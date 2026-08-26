@@ -1,0 +1,120 @@
+"""diffu-GRPO 的优势估计与损失。
+
+与标准 GRPO 的差别只在 log-prob 从哪来：AR 模型靠链式法则，这里靠 `dllm.logprob` 的
+单步近似。近似带来的 ratio 噪声正是官方把 clip 范围 ε 放到 0.5 的原因，
+所以 `ratio_out_of_range_frac` 这个统计量必须记录——它是 P2 分析的直接证据。
+"""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+
+import torch
+
+
+@dataclass
+class GRPOStats:
+    loss: float
+    policy_loss: float
+    kl: float
+    ratio_mean: float
+    ratio_std: float
+    ratio_out_of_range_frac: float  # ratio 落在 [1-ε, 1+ε] 之外的比例
+    clip_active_frac: float  # 真正被 clip 分支接管的比例
+    advantage_abs_mean: float
+
+    def to_dict(self) -> dict[str, float]:
+        return asdict(self)
+
+
+def compute_advantages(
+    rewards: torch.Tensor,
+    num_generations: int,
+    scale_rewards: bool = True,
+) -> torch.Tensor:
+    """组内归一化的优势。
+
+    rewards 形状 (num_prompts * num_generations,)，同一 prompt 的若干条补全必须相邻。
+    scale_rewards 对应 TRL GRPOTrainer 的同名参数，默认 True；注意 d1 论文式 2 写的是
+    只减均值、不除标准差。
+    """
+    if rewards.ndim != 1:
+        raise ValueError(f"rewards 应为一维，收到 {tuple(rewards.shape)}")
+    if rewards.numel() % num_generations != 0:
+        raise ValueError(
+            f"rewards 数量 {rewards.numel()} 不能被 num_generations {num_generations} 整除"
+        )
+
+    grouped = rewards.view(-1, num_generations).float()
+    advantages = grouped - grouped.mean(dim=1, keepdim=True)
+    if scale_rewards:
+        # 组内奖励全同时标准差为 0，此时优势本就该是 0，加 eps 防止除零产生 NaN
+        advantages = advantages / (grouped.std(dim=1, keepdim=True) + 1e-4)
+    return advantages.reshape(-1)
+
+
+def grpo_loss(
+    logp_new: torch.Tensor,
+    logp_old: torch.Tensor,
+    advantages: torch.Tensor,
+    completion_mask: torch.Tensor,
+    epsilon: float,
+    beta: float = 0.0,
+    logp_ref: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, GRPOStats]:
+    """返回标量损失与诊断统计。
+
+    logp_new / logp_old / logp_ref 形状 (B, C)，且必须是在**同一个** prompt 掩码模式 q'
+    上算出来的——论文式 4 中 q' 位于期望之内，三者共享。
+    """
+    if beta > 0 and logp_ref is None:
+        raise ValueError("beta > 0 时必须提供 logp_ref")
+
+    advantages = advantages.unsqueeze(1)
+    mask = completion_mask.float()
+    token_count = mask.sum(dim=1).clamp_min(1.0)
+
+    log_ratio = logp_new - logp_old
+    ratio = torch.exp(log_ratio)
+    unclipped = ratio * advantages
+    clipped = ratio.clamp(1.0 - epsilon, 1.0 + epsilon) * advantages
+    policy_token_loss = -torch.min(unclipped, clipped)
+
+    token_loss = policy_token_loss
+    kl_value = torch.zeros((), device=logp_new.device)
+    if beta > 0:
+        # k3 估计量，非负且方差低于朴素的 (ref - new)
+        log_ratio_ref = logp_ref - logp_new
+        kl_token = torch.exp(log_ratio_ref) - log_ratio_ref - 1.0
+        token_loss = token_loss + beta * kl_token
+        kl_value = (kl_token * mask).sum(dim=1).div(token_count).mean()
+
+    loss = (token_loss * mask).sum(dim=1).div(token_count).mean()
+
+    with torch.no_grad():
+        policy_loss = (policy_token_loss * mask).sum(dim=1).div(token_count).mean()
+        masked_ratio = ratio[mask.bool()]
+        if masked_ratio.numel() == 0:
+            ratio_mean = ratio_std = out_of_range = 0.0
+        else:
+            ratio_mean = masked_ratio.mean().item()
+            ratio_std = masked_ratio.std().item() if masked_ratio.numel() > 1 else 0.0
+            out_of_range = (
+                ((masked_ratio < 1.0 - epsilon) | (masked_ratio > 1.0 + epsilon))
+                .float()
+                .mean()
+                .item()
+            )
+        clip_active = ((clipped < unclipped).float() * mask).sum() / mask.sum().clamp_min(1.0)
+        stats = GRPOStats(
+            loss=loss.item(),
+            policy_loss=policy_loss.item(),
+            kl=kl_value.item(),
+            ratio_mean=ratio_mean,
+            ratio_std=ratio_std,
+            ratio_out_of_range_frac=out_of_range,
+            clip_active_frac=clip_active.item(),
+            advantage_abs_mean=advantages.abs().mean().item(),
+        )
+
+    return loss, stats

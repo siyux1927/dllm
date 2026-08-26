@@ -1,0 +1,38 @@
+# 本地开发环境（CPU）。版本对齐 d1 官方 env.yml，保证本地写的代码到 Colab 上行为一致。
+#
+#   conda env create -f environment.yml
+#   conda activate dllm-dev
+#   python scripts/check_env.py
+#
+# 注意：torch 走 PyTorch 官方 CPU 源，trl 必须锁到 d1 使用的那个 commit，
+# 否则 GRPOTrainer 的接口对不上。
+
+name: dllm-dev
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - setuptools
+  - wheel
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cpu
+      - torch==2.6.0
+      - numpy==1.26.4
+      - transformers==4.49.0
+      - accelerate==1.4.0
+      - peft==0.15.1
+      - datasets==3.3.2
+      - git+https://github.com/huggingface/trl.git@0f88c179e30b3439467942a08c3190f624d5c423
+      - tiktoken==0.9.0
+      - sentencepiece
+      - evaluate
+      - scipy
+      - scikit-learn
+      - pandas
+      - matplotlib
+      - tqdm
+      - regex
+      - pyyaml
+      - wandb
+      - pytest

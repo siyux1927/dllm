@@ -1,0 +1,34 @@
+# Colab (A100) 依赖。用法：
+#
+#   !pip install -q -r requirements-colab.txt
+#   !python scripts/check_env.py
+#
+# 关于 torch：Colab 预装的版本通常远新于 2.6.0，而 transformers 4.49 与
+# LLaDA 的远程建模代码都是那个时代的产物。稳妥起见显式装 2.6.0+cu124
+# 与本地对齐（约 2.5GB，几分钟）。如果 Colab 预装版本能跑通，可以注释掉这两行省时间。
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0
+
+numpy==1.26.4
+transformers==4.49.0
+accelerate==1.4.0
+peft==0.15.1
+datasets==3.3.2
+git+https://github.com/huggingface/trl.git@0f88c179e30b3439467942a08c3190f624d5c423
+tiktoken==0.9.0
+sentencepiece
+evaluate
+scipy
+scikit-learn
+pandas
+matplotlib
+tqdm
+regex
+pyyaml
+wandb
+
+# 不装的东西，以及原因：
+#   bitsandbytes  —— 已决定用 bf16 而非 4-bit（见 plan-diffu-grpo.md 第 2 节）
+#   deepspeed     —— 单卡不需要 ZeRO
+#   flash-attn    —— Colab 上编译要 20 分钟以上且易与 torch 版本冲突，
+#                    LLaDA 是双向注意力，attn_implementation="sdpa" 完全够用

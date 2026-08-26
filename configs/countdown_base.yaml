@@ -1,0 +1,64 @@
+# P3 基线：vanilla diffu-GRPO，单卡 A100-40GB。
+# 与 d1 官方 slurm_scripts/train.yaml 的逐项对照及偏离理由见 docs/plan-diffu-grpo.md 第 2、3 节。
+
+model:
+  model_path: GSAI-ML/LLaDA-8B-Instruct
+  torch_dtype: bfloat16
+  attn_implementation: sdpa      # 官方 flash_attention_2，Colab 上编译慢且易冲突
+  trust_remote_code: true
+  mask_token_id: 126336
+  lora_r: 128
+  lora_alpha: 64                 # 不要改：alpha < r，缩放系数 0.5
+  lora_dropout: 0.05
+
+sampling:
+  max_prompt_length: 128         # 官方 200
+  max_completion_length: 128     # 官方 256
+  block_length: 32
+  diffusion_steps: 64            # 官方 128
+  temperature: 1.0
+  remasking: low_confidence
+  use_cache: false               # P4 才打开
+  dual_cache: false
+  confidence_threshold: null
+
+grpo:
+  num_generations: 6
+  num_prompts_per_step: 4        # 官方 8 卡合计 16
+  num_iterations: 12             # 不要改：随机 prompt masking 的正则效应是 d1 的核心
+  epsilon: 0.5                   # 不要改：单步 log-prob 近似让 ratio 噪声大
+  beta: 0.04
+  p_mask_prompt: 0.15
+  random_masking: true
+  scale_rewards: true
+  reward_format_weight: 0.2
+  reward_correct_weight: 1.0
+
+optim:
+  learning_rate: 3.0e-6
+  lr_scheduler_type: constant_with_warmup
+  warmup_ratio: 0.0001
+  adam_beta1: 0.9
+  adam_beta2: 0.99               # 是 0.99 不是 0.999
+  weight_decay: 0.1
+  max_grad_norm: 0.2
+
+run:
+  seed: 42
+  max_steps: 200
+  save_steps: 25                 # 官方 100；Colab 会断线
+  eval_steps: 50
+  log_every: 1
+  output_dir: checkpoints/countdown_base
+  metrics_path: results/countdown_base.csv
+  report_to: none
+
+data:
+  task: countdown
+  num_train: 4000
+  num_eval: 500
+  num_operands: 3
+  min_operand: 1
+  max_operand: 60
+  min_target: 10
+  max_target: 500
