@@ -4,7 +4,8 @@
 其余继续保持掩码。块级推进是 LLaDA 的半自回归设定，也是后续接 Fast-dLLM 块级 KV cache
 的前提。
 
-这里是全项目的耗时大头（P1 阶段实测约占单步的 70-80%），也是 P4 要动的地方。
+这里是单步耗时里最大的一段，也是 P4 要动的地方。具体占比取决于 diffusion_steps 与 μ 的
+取值，由 `dllm.experiment.step_compute_budget` 推算、P1 实测核对——不要凭印象引用这个数字。
 """
 
 from __future__ import annotations

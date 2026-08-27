@@ -6,6 +6,8 @@ LoRA 状态存取这些最容易在 Colab 上翻车的环节，在本地就被�
 
 from __future__ import annotations
 
+import shutil
+
 import pytest
 import torch
 
@@ -21,7 +23,7 @@ from dllm.config import (
 from dllm.data.countdown import build_countdown_dataset
 from dllm.models.tiny import TinyMaskedDiffusionLM
 from dllm.rewards.countdown import RewardBreakdown, batch_rewards
-from dllm.train.checkpoint import load_checkpoint
+from dllm.train.checkpoint import load_checkpoint, mirror_checkpoint
 from dllm.train.loop import DiffuGRPOTrainer, PromptSampler, completion_mask_from_eos
 from dllm.train.policy import Policy
 
@@ -310,3 +312,80 @@ def test_train_runs_multiple_steps_and_checkpoints(tmp_path):
     assert len(history) == 2
     assert trainer.step_index == 2
     assert load_checkpoint(tmp_path) is not None
+
+
+def test_resume_reads_local_checkpoint(tmp_path):
+    """resume() 是把 load_checkpoint 真正接上训练循环的那一环。
+
+    此前 checkpoint 存得好好的，却没有任何代码路径会去读它——存了等于没存。
+    """
+    trainer = make_trainer()
+    trainer.config.run.output_dir = str(tmp_path)
+    trainer.step()
+    trainer.step()
+    trainer.save(tmp_path)
+
+    revived = make_trainer()
+    revived.config.run.output_dir = str(tmp_path)
+    assert revived.resume() is True
+    assert revived.step_index == 2
+
+
+def test_resume_falls_back_to_the_drive_mirror(tmp_path):
+    """Colab 重连后换了机器，本地目录是空的，必须能从 Drive 镜像接上。"""
+    local = tmp_path / "local"
+    drive = tmp_path / "drive"
+    trainer = make_trainer()
+    trainer.config.run.output_dir = str(local)
+    trainer.config.run.mirror_dir = str(drive)
+    trainer.step()
+    trainer.save(local)
+    assert mirror_checkpoint(local, drive) is not None
+
+    shutil.rmtree(local)  # 模拟 /content 被清空
+
+    revived = make_trainer()
+    revived.config.run.output_dir = str(local)
+    revived.config.run.mirror_dir = str(drive)
+    assert revived.resume() is True
+    assert revived.step_index == 1
+
+
+def test_resume_returns_false_when_nothing_saved(tmp_path):
+    trainer = make_trainer()
+    trainer.config.run.output_dir = str(tmp_path / "missing")
+    trainer.config.run.mirror_dir = str(tmp_path / "also-missing")
+    assert trainer.resume() is False
+    assert trainer.step_index == 0
+
+
+def test_mirror_happens_on_schedule_not_every_save(tmp_path):
+    """Drive 上的 checkpoint 约 4GB、写一次要几分钟，不能每次保存都镜像。"""
+    local = tmp_path / "local"
+    drive = tmp_path / "drive"
+    trainer = make_trainer()
+    trainer.config.run.output_dir = str(local)
+    trainer.config.run.mirror_dir = str(drive)
+    trainer.config.run.save_steps = 1
+    trainer.config.run.mirror_every = 3
+
+    mirrored = [trainer.checkpoint()["checkpoint/mirrored"] for _ in _steps(trainer, 6)]
+    assert mirrored == [0, 0, 1, 0, 0, 1], f"应每 3 次保存镜像一次，实际 {mirrored}"
+    assert load_checkpoint(drive) is not None
+
+
+def test_checkpoint_reports_size_and_duration(tmp_path):
+    """存盘耗时必须计量。4GB 写 Drive 要几分钟，不计量就看不见它吃掉了多少训练时间。"""
+    trainer = make_trainer()
+    trainer.config.run.output_dir = str(tmp_path)
+    trainer.step()
+    stats = trainer.checkpoint()
+    assert stats["checkpoint/size_mb"] > 0
+    assert stats["checkpoint/local_s"] >= 0
+
+
+def _steps(trainer, count):
+    """推进 step_index 而不真的训练，用于测保存节奏。"""
+    for _ in range(count):
+        trainer.step_index += 1
+        yield trainer.step_index

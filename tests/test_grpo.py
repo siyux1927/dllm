@@ -128,6 +128,27 @@ def test_beta_without_reference_raises():
         grpo_loss(logp_old.clone(), logp_old, advantages, mask, epsilon=0.5, beta=0.04)
 
 
+def test_gradient_flows_only_into_the_current_policy():
+    """θ_old 与 θ_ref 在目标函数里是常数。
+
+    若梯度能流进它们，损失会额外获得一条「把 logp_old 压低」的下降路径——ratio 照样变大、
+    loss 照样下降、训练照常跑完，优化的却不是 GRPO 的目标。
+    """
+    logp_old, advantages, mask = _inputs()
+    logp_old = logp_old.clone().requires_grad_(True)
+    logp_ref = torch.randn_like(logp_old).requires_grad_(True)
+    logp_new = torch.randn_like(logp_old).requires_grad_(True)
+
+    loss, _ = grpo_loss(
+        logp_new, logp_old, advantages, mask, epsilon=0.5, beta=0.04, logp_ref=logp_ref
+    )
+    loss.backward()
+
+    assert logp_new.grad is not None, "梯度必须流向 θ"
+    assert logp_old.grad is None, "梯度不应流向 θ_old"
+    assert logp_ref.grad is None, "梯度不应流向 θ_ref"
+
+
 def test_completion_mask_excludes_padded_positions():
     logp_old = torch.zeros(1, 4)
     logp_new = torch.tensor([[0.0, 0.0, 5.0, 5.0]])

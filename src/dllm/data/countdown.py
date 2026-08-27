@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import json
 import random
+from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
 
 PROMPT_TEMPLATE = (
     "Using the numbers {numbers}, create an equation that equals {target}. "

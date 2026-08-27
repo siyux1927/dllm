@@ -13,6 +13,8 @@ q_proj / k_proj / v_proj / o_proj / gate_proj / up_proj / down_proj，
 from __future__ import annotations
 
 import math
+import zlib
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
@@ -23,6 +25,59 @@ from torch import nn
 @dataclass
 class TinyModelOutput:
     logits: torch.Tensor
+
+
+class TinyTokenizer:
+    """词表极小的替身分词器，接口对齐 HF tokenizer 中本项目用到的那部分。
+
+    词表里刻意放进 <answer> 标签、数字和四则运算符：这样随机初始化的小模型也能偶尔
+    吐出格式合法的补全，奖励于是有非零方差、优势不全为零、梯度真的流动。
+    若解码结果全是无意义字符，冒烟测试会在「损失恒为 0」的情况下通过，等于没测。
+    """
+
+    pad_token_id = 0
+    eos_token_id = 1
+    mask_token_id = 2
+
+    def __init__(self, max_number: int = 60) -> None:
+        self._vocab = ["<pad>", "<eos>", "<mask>"]
+        self._vocab += ["<think>", "</think>", "<answer>", "</answer>"]
+        self._vocab += [str(n) for n in range(max_number + 1)]
+        self._vocab += ["+", "-", "*", "/", "(", ")", "=", "and", "then", "so"]
+        self._first_regular = 3
+
+    @property
+    def vocab_size(self) -> int:
+        return len(self._vocab)
+
+    def apply_chat_template(
+        self, messages, add_generation_prompt: bool = False, tokenize: bool = False
+    ) -> str:
+        text = " ".join(m["content"] for m in messages)
+        return f"user: {text}" + (" assistant:" if add_generation_prompt else "")
+
+    def __call__(self, text: str, add_special_tokens: bool = False) -> dict[str, list[int]]:
+        # 用 crc32 而非内置 hash：后者对字符串按进程加盐，同一段文本换个进程就是另一串 id
+        span = self.vocab_size - self._first_regular
+        ids = [
+            self._first_regular + (zlib.crc32(word.encode("utf-8")) % span)
+            for word in text.split()
+        ]
+        return {"input_ids": ids}
+
+    def batch_decode(
+        self, sequences: Sequence[Sequence[int]], skip_special_tokens: bool = True
+    ) -> list[str]:
+        skip = {self.pad_token_id, self.eos_token_id, self.mask_token_id}
+        out = []
+        for row in sequences:
+            tokens = [
+                self._vocab[int(i)]
+                for i in row
+                if not (skip_special_tokens and int(i) in skip)
+            ]
+            out.append(" ".join(tokens))
+        return out
 
 
 class TinyAttention(nn.Module):

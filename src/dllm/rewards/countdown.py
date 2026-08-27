@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import ast
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import Sequence
 
 from dllm.data.countdown import CountdownProblem
 
@@ -154,5 +154,5 @@ def batch_rewards(
         raise ValueError(f"completions({len(completions)}) 与 problems({len(problems)}) 数量不一致")
     return [
         compute_reward(c, p, format_weight, correct_weight)
-        for c, p in zip(completions, problems)
+        for c, p in zip(completions, problems, strict=True)
     ]

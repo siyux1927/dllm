@@ -12,6 +12,8 @@ addopts = "-q"
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+# notebook 是 scripts/_build_notebook.py 生成的产物，改它没有意义，去改生成脚本
+extend-exclude = ["notebooks"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

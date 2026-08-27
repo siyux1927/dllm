@@ -174,3 +174,37 @@ def test_peft_trainable_parameters_are_lora_only():
     names = [n for n, p in policy.model.named_parameters() if p.requires_grad]
     assert names, "应有可训练参数"
     assert all("lora" in n for n in names), "只有 LoRA 适配器该被训练"
+
+
+def test_trainable_parameters_exclude_the_old_adapter():
+    """优化器不该持有 θ_old 的参数。
+
+    当前 peft 版本下 add_adapter 只把激活的适配器标为可训练，所以这里手动把 old 的参数
+    置为 requires_grad，构造出那个危险状态：只靠 requires_grad 筛选的话，优化器会一并
+    收下 θ_old。这条筛选不能依赖 peft 的默认行为。
+    """
+    policy = _peft_policy()
+    old_params = [p for name, p in policy.model.named_parameters() if ".old." in name]
+    assert old_params, "测试前提：old 适配器确实存在"
+    for p in old_params:
+        p.requires_grad_(True)
+
+    trainable = {id(p) for p in policy.trainable_parameters()}
+    assert not any(id(p) in trainable for p in old_params)
+    expected = {
+        id(p)
+        for name, p in policy.model.named_parameters()
+        if ".default." in name and p.requires_grad
+    }
+    assert trainable == expected
+
+
+def test_trainable_parameters_raise_when_default_adapter_missing():
+    torch.manual_seed(0)
+    base = TinyMaskedDiffusionLM(vocab_size=64, hidden_size=32, num_layers=2)
+    config = peft.LoraConfig(
+        r=4, lora_alpha=4, lora_dropout=0.0, target_modules=list(ModelConfig().lora_target_modules)
+    )
+    model = peft.get_peft_model(base, config, adapter_name="policy")
+    with pytest.raises(ValueError, match="没找到任何属于"):
+        Policy(model, is_peft=True).trainable_parameters()

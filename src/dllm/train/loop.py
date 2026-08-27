@@ -22,16 +22,25 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from time import perf_counter
+from typing import Any
 
 import torch
 
 from dllm.config import Config
 from dllm.logprob.estimators import one_step_token_logprobs, sample_prompt_mask
 from dllm.sampling.diffusion import generate
-from dllm.train.checkpoint import load_rng_state, rng_state, save_checkpoint
+from dllm.train.checkpoint import (
+    checkpoint_bytes,
+    load_checkpoint,
+    load_rng_state,
+    mirror_checkpoint,
+    rng_state,
+    save_checkpoint,
+)
 from dllm.train.grpo import compute_advantages, grpo_loss
 from dllm.train.policy import Policy
 from dllm.utils.metrics import MetricsLogger
@@ -312,13 +321,56 @@ class DiffuGRPOTrainer:
         return metrics
 
     def train(self, max_steps: int | None = None) -> list[dict[str, Any]]:
-        target = max_steps or self.config.run.max_steps
+        run = self.config.run
+        target = max_steps or run.max_steps
         history = []
         while self.step_index < target:
-            history.append(self.step())
-            if self.step_index % self.config.run.save_steps == 0:
-                self.save(self.config.run.output_dir)
+            metrics = self.step()
+            if self.step_index % run.save_steps == 0:
+                metrics.update(self.checkpoint())
+                if self.logger is not None:
+                    self.logger.log(metrics)
+            history.append(metrics)
         return history
+
+    def checkpoint(self) -> dict[str, Any]:
+        """本地保存，并按 mirror_every 的节奏镜像到 Drive。
+
+        存盘耗时一并记进指标：4GB 的 checkpoint 写 Drive 要几分钟，如果它悄悄吃掉了
+        三成训练时间，只有把它计量出来才看得见。
+        """
+        run = self.config.run
+        started = perf_counter()
+        self.save(run.output_dir)
+        result: dict[str, Any] = {
+            "checkpoint/local_s": perf_counter() - started,
+            "checkpoint/size_mb": checkpoint_bytes(run.output_dir) / 1e6,
+            "checkpoint/mirrored": 0,
+        }
+
+        saves = self.step_index // max(run.save_steps, 1)
+        if run.mirror_dir and saves % max(run.mirror_every, 1) == 0:
+            started = perf_counter()
+            mirror_checkpoint(run.output_dir, run.mirror_dir)
+            result["checkpoint/mirror_s"] = perf_counter() - started
+            result["checkpoint/mirrored"] = 1
+        return result
+
+    def resume(self, directory: str | Path | None = None) -> bool:
+        """从 checkpoint 恢复，没有则返回 False。
+
+        优先读本地；本地没有（会话换了机器就是这种情况）再读 Drive 镜像。
+        """
+        run = self.config.run
+        candidates = [directory] if directory else [run.output_dir, run.mirror_dir]
+        for candidate in candidates:
+            if not candidate:
+                continue
+            state = load_checkpoint(candidate, map_location=str(self.device))
+            if state is not None:
+                self.load_state_dict(state)
+                return True
+        return False
 
     def state_dict(self) -> dict[str, Any]:
         return {

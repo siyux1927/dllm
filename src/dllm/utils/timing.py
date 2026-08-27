@@ -9,9 +9,9 @@ CUDA 是异步的，不同步就计时会把等待算到下一段头上，所以
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from time import perf_counter
-from typing import Callable, Iterator
 
 
 class PhaseTimer:

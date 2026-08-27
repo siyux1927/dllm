@@ -35,4 +35,6 @@ dependencies:
       - regex
       - pyyaml
       - wandb
+      # 开发工具，Colab 上不需要
       - pytest
+      - ruff

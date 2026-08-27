@@ -46,10 +46,16 @@ optim:
 run:
   seed: 42
   max_steps: 200
-  save_steps: 25                 # 官方 100；Colab 会断线
+  save_steps: 25                 # 官方 100；Colab 会断线。本地保存，快
   eval_steps: 50
   log_every: 1
   output_dir: checkpoints/countdown_base
+  # checkpoint 约 4GB（LoRA r=128 的 3.36 亿参数 + AdamW 两个矩），
+  # Drive 写入约 10-20MB/s，存一次要 3-7 分钟。所以本地高频存、Drive 低频镜像：
+  # 前者救进程崩溃，后者救会话断开，代价不同频率就该不同。
+  # Colab 上把 mirror_dir 指向 Drive；先用 notebook 第 8 节实测写入速度再定 mirror_every
+  mirror_dir: null
+  mirror_every: 4                # 每 4 次本地保存镜像一次，即每 100 步
   metrics_path: results/countdown_base.csv
   report_to: none
 

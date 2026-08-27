@@ -116,6 +116,10 @@ class RunConfig:
     eval_steps: int = 50
     log_every: int = 1
     output_dir: str = "checkpoints/countdown_base"
+    # Colab 上指向 Drive。checkpoint 约 4GB 而 Drive 写入约 10-20MB/s，
+    # 存一次要几分钟，所以本地高频存、Drive 低频镜像，覆盖两种不同的故障
+    mirror_dir: str | None = None
+    mirror_every: int = 4  # 每 mirror_every 次本地保存镜像一次
     metrics_path: str = "results/metrics.csv"
     report_to: str = "none"  # none | wandb
     device: str = "auto"

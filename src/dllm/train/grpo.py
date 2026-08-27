@@ -70,6 +70,12 @@ def grpo_loss(
     if beta > 0 and logp_ref is None:
         raise ValueError("beta > 0 时必须提供 logp_ref")
 
+    # θ_old 与 θ_ref 在目标函数里是常数。调用方目前已在 no_grad 下取它们，这里再断一次，
+    # 使得「梯度只流向 θ」这条性质由损失函数自身保证，而不依赖调用方的上下文管理器。
+    logp_old = logp_old.detach()
+    if logp_ref is not None:
+        logp_ref = logp_ref.detach()
+
     advantages = advantages.unsqueeze(1)
     mask = completion_mask.float()
     token_count = mask.sum(dim=1).clamp_min(1.0)

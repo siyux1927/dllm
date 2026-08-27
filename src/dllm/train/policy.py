@@ -11,8 +11,8 @@ diffu-GRPO 每次内更新都需要三个前向：当前策略（带梯度）、
 from __future__ import annotations
 
 import copy
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Iterator
 
 import torch
 from torch import nn
@@ -38,7 +38,26 @@ class Policy:
                 p.requires_grad_(False)
 
     def trainable_parameters(self) -> list[nn.Parameter]:
-        return [p for p in self.model.parameters() if p.requires_grad]
+        """只返回 θ 的参数。
+
+        peft 会把 old 适配器的 LoRA 参数也标成 requires_grad，若原样交给优化器，
+        优化器就持有了一批它永远不该更新的参数。眼下靠 `as_old` 里的 no_grad 兜底不出错，
+        但那是隐式的：哪天 no_grad 被重构掉，θ_old 会跟着被优化，且不会有任何报错。
+        """
+        if not self.is_peft:
+            return [p for p in self.model.parameters() if p.requires_grad]
+
+        params = [
+            p
+            for name, p in self.model.named_parameters()
+            if p.requires_grad and f".{DEFAULT_ADAPTER}." in name
+        ]
+        if not params:
+            raise ValueError(
+                f"没找到任何属于 '{DEFAULT_ADAPTER}' 适配器的可训练参数，"
+                "LoRA 可能没装上，或适配器命名与预期不符"
+            )
+        return params
 
     def sync_old(self) -> None:
         """把当前策略快照为 θ_old。每个 outer step 开始时调用一次。"""

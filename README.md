@@ -1,7 +1,7 @@
 # 把推理加速塞进扩散语言模型的强化学习循环
 
-扩散语言模型（dLLM）的强化学习训练，七到八成时间耗在在线采样上。把 training-free 的
-推理加速接进 rollout 环节能大幅提速，但并行解码会改变采样分布、破坏 on-policy 假设。
+扩散语言模型（dLLM）的强化学习训练，大半时间耗在在线采样上。把 training-free 的
+推理加速接进 rollout 环节能提速，但并行解码会改变采样分布、破坏 on-policy 假设。
 本项目量化这个权衡，并找出安全的加速配置。
 
 模型 `LLaDA-8B-Instruct`，任务 Countdown，单卡 A100-40GB。
@@ -13,8 +13,8 @@
 | 幕 | 问题 | 状态 |
 |---|---|---|
 | 0 | dLLM 的 RL 后训练现状：d1 自己承认「在线生成开销过大，因此把生成长度限制在 256」 | — |
-| 1 | 耗时到底花在哪？分阶段拆解，定位瓶颈在采样而非反向 | 待跑 |
-| 2 | diffu-GRPO 的地基是单步 log-prob 近似。它有多准？论文没报告过 | 待跑 |
+| 1 | 耗时到底花在哪？分阶段拆解，定位瓶颈并推出加速的收益上限 | 代码就绪，待上 Colab |
+| 2 | diffu-GRPO 的地基是单步 log-prob 近似。它有多准？论文没报告过 | 代码就绪，待上 Colab |
 | 3 | 把 Fast-dLLM 的块级 KV cache 与置信度并行解码接进 rollout | 待做 |
 | 4 | 加速改变采样分布，引入额外 off-policy 偏差。量化这个权衡 | 待做 |
 | 5 | 同等墙钟时间下的 reward 曲线对比，加 GSM8K 回归检查 | 待做 |
@@ -25,13 +25,20 @@
 
 ## 当前进度
 
-**P0 本地骨架已完成**，106 个测试全绿，全部可在 CPU 上跑。
+**P0 本地骨架 + P1/P2 的 Colab 入口已完成**，137 个测试全绿，全部可在 CPU 上跑。
 
 已实现：Countdown 合成与去重、格式/正确性分离的奖励函数、块级扩散采样、
 单步与蒙特卡洛两种 log-prob 估计器、diffu-GRPO 损失、θ/θ_old/θ_ref 三策略封装、
-分阶段计时、指标打点、断点续训。
+分阶段计时、指标打点、断点续训、LLaDA 装配与三项自检、单步算力预算推导。
 
-下一步是 P1：在 Colab 上跑通 LLaDA-8B 并拿到第 1 幕的耗时拆解数据。
+下一步是把 [`notebooks/colab_p1_p2.ipynb`](notebooks/colab_p1_p2.ipynb) 拿到 A100 上跑，
+取得第 1、2 幕的实测数据。
+
+> **一个已经浮现的问题。** 算力预算显示，当前配置（`diffusion_steps=64`）下采样只占单步
+> 约 52%，而非计划里写的 70–80%——后者对应的是 d1 官方的 128 步。按 Amdahl，
+> 采样占 52% 时端到端加速上限只有 2.1x，而且 64 步配 128 长度等于每步解 2 个 token，
+> 基线本身已经在并行解码了。P1 会在两个取值上各测一遍再定，详见
+> [`docs/plan-diffu-grpo.md`](docs/plan-diffu-grpo.md) 的 P1 一节。
 
 ## 快速开始
 
@@ -39,15 +46,18 @@
 conda env create -f environment.yml
 conda activate dllm-dev
 python scripts/check_env.py     # 校验版本与 trl commit 是否正确
-python -m pytest                # 106 个 CPU 测试
+python -m pytest                # 137 个 CPU 测试
+python -m ruff check .
 ```
 
-Colab：
+上 Colab 之前，先在本地 CPU 上把两个脚本的整条路径跑通（数字无意义，只验证接线）：
 
-```python
-!pip install -q -r requirements-colab.txt
-!python scripts/check_env.py
+```bash
+python scripts/run_p1_profile.py --config configs/countdown_base.yaml --tiny --steps 2
+python scripts/run_p2_logprob.py --config configs/countdown_base.yaml --tiny --mc-samples 16
 ```
+
+Colab：打开 `notebooks/colab_p1_p2.ipynb`，运行时选 A100。
 
 ## 设计上的几个决定
 
@@ -63,24 +73,58 @@ Colab：
 **CPU 小模型的结构对齐 LLaDA**（`q_proj` / `gate_proj` 等命名），因此单测里的 LoRA
 `target_modules` 与真实配置是同一份，适配器挂不上会在本地就暴露。
 
+**每个自检都对应一种「不报错的失效」。** 这类问题在 8B 模型上要烧几小时 A100 才可能发现，
+所以尽量在 CPU 上、或在加载权重的第一分钟内就把它们变成显式报错。
+
+**按「Colab 一定会断」来设计存盘。** 掉线是常态不是异常：
+
+- P1/P2 每完成一个阶段就把结果落盘，不等全部跑完。原子写（先写 `.tmp` 再 replace），
+  避免写到一半掉线留下截断的 JSON——那会把上一次成功的结果一起毁掉。
+- checkpoint 分两级。LoRA `r=128` 在 LLaDA-8B 上是 3.36 亿参数，加 AdamW 两个矩约 **4GB**；
+  Drive 写入约 10-20MB/s，存一次要 3-7 分钟，比一个训练步还慢。
+  所以本地每 `save_steps` 步存一次（救进程崩溃），每 `mirror_every` 次镜像到 Drive
+  （救会话断开）。存盘耗时记进指标，免得它悄悄吃掉大半训练时间。
+- `trainer.resume()` 先找本地，本地没有（重连后换机器就是这种情况）再回落到 Drive 镜像。
+
 ## 踩过的坑
 
 `nn.TransformerEncoderLayer` 在 eval 模式下走融合快速路径，**绕过 `linear1` / `linear2`
 子模块**，挂在上面的 LoRA 会被静默忽略——前向照常返回结果，训练看着也在跑，但适配器是死的。
 小模型因此改成显式的 Transformer 块，并留了一条回归测试同时断言「被包装」和「被调用」。
+`load_llada` 里的 `probe_lora_is_live` 是同一条检查在真实模型上的版本。
+
+由此衍生出的三条自检：
+
+- **`resolve_target_modules`**：LLaDA 派生自 OLMo，线性层未必叫 `q_proj` / `gate_proj`。
+  匹配不上就带着模型真实的模块名单报错；**只匹配上一部分同样报错**——部分命中比全不命中
+  更危险，它会给你一个和预期不同却照常训练的模型。
+- **`probe_padding_invariance`**：LLaDA 官方的 generate 按单条 prompt 写就，从没验证过
+  带 padding 的批处理。区分「attention_mask 失效」（硬伤）与「位置编码随 padding 平移」
+  （RoPE 不受影响，绝对位置嵌入会）。
+- **`Policy.trainable_parameters` 只返回 `default` 适配器**。peft 会把 `old` 适配器一并
+  交出来，眼下靠 `as_old` 里的 `no_grad` 兜底才没出错——但那样「θ_old 会不会被优化」
+  就取决于一个远处的上下文管理器。`grpo_loss` 里也对 θ_old、θ_ref 显式 `detach`。
 
 ## 目录
 
 ```
 src/dllm/
 ├── config.py          超参 dataclass，「不要改」的项在注释里写明理由
+├── experiment.py      实验装配、单步算力预算、Amdahl 上限
 ├── data/              Countdown 合成
 ├── rewards/           格式与正确性奖励，AST 安全求值
 ├── sampling/          块级扩散采样（P4 在此接入 Fast-dLLM）
 ├── logprob/           单步近似与蒙特卡洛真值（P2 的对照对象）
 ├── train/             GRPO 损失、策略封装、训练循环、断点续训
-├── models/            CPU 单测用的小模型
+├── models/            llada.py 真实装配与自检；tiny.py CPU 替身
 └── utils/             分阶段计时、指标打点
+
+scripts/
+├── check_env.py       版本与 trl commit 校验
+├── run_p1_profile.py  P1 耗时拆解（--tiny 可在 CPU 上跑通路径）
+└── run_p2_logprob.py  P2 log-prob 误差量化（同上）
+
+notebooks/colab_p1_p2.ipynb   Colab 入口
 ```
 
 ## 参考
