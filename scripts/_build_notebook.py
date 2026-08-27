@@ -132,15 +132,37 @@ md(
 
 约 5-10 分钟，主要花在 torch 上。
 
-版本是钉死的。`transformers` 必须是 4.x：LLaDA 的 `trust_remote_code` 建模代码写于 4.49 时代，
-5.x 改掉了它依赖的若干内部接口。这类不兼容往往不是干净的报错，而是加载到一半出些
-莫名其妙的属性错误。
+版本是钉死的，有两处容易踩：
+
+- **`transformers` 必须是 4.x**。LLaDA 的 `trust_remote_code` 建模代码写于 4.49 时代，
+  5.x 改掉了它依赖的若干内部接口。这类不兼容往往不是干净的报错，
+  而是加载到一半出些莫名其妙的属性错误。
+- **换 torch 就必须一起换 torchvision**。二者的 C++ 扩展是配对编译的。
+  只把 torch 钉到 2.6.0、留着 Colab 预装的 torchvision，`torchvision::nms` 就注册不上；
+  而 `transformers.image_utils` 会无条件 import torchvision，
+  于是连 `AutoModel` 都加载不了，报错却指向 transformers 内部，完全看不出病因。
+
+下面**不截断 pip 的输出**。装依赖失败如果被 `| tail` 吞掉，
+你会带着一个半好不坏的环境往下跑，到加载模型时才炸。
 """
 )
 
 code(
     """
-!pip install -q -r requirements-colab.txt 2>&1 | tail -n 5
+import subprocess
+import sys
+
+result = subprocess.run(
+    [sys.executable, '-m', 'pip', 'install', '-r', 'requirements-colab.txt'],
+    capture_output=True, text=True)
+
+tail = result.stdout.strip().split('\\n')[-15:]
+print('\\n'.join(tail))
+if result.returncode != 0:
+    print('\\n--- pip 报错 ---')
+    print(result.stderr[-4000:])
+    raise SystemExit('依赖安装失败，先修好再往下走')
+print('\\n依赖安装完成')
 """
 )
 
@@ -170,6 +192,9 @@ os.environ['HF_HOME'] = str(DRIVE_ROOT / 'hf-cache')
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 os.chdir(PROJECT_DIR)
 
+# check_env 会先验 torchvision 的算子再去 import transformers / trl。
+# 顺序是有意的：后者的导入链会踩到 torchvision，一旦踩爆，
+# 报出来的是一条指向 transformers 内部的六十行 traceback，看不出真正的病因。
 !python scripts/check_env.py
 """
 )

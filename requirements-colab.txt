@@ -5,11 +5,22 @@
 #
 # 关于 torch：Colab 预装的版本通常远新于 2.6.0，而 transformers 4.49 与
 # LLaDA 的远程建模代码都是那个时代的产物。稳妥起见显式装 2.6.0+cu124
-# 与本地对齐（约 2.5GB，几分钟）。如果 Colab 预装版本能跑通，可以注释掉这两行省时间。
+# 与本地对齐（约 2.5GB，几分钟）。
+#
+# torchvision 与 torchaudio 必须跟着一起钉死。它们的 C++ 扩展是按特定 torch 版本
+# 编译的，只换 torch 会让 Colab 预装的 torchvision 注册不上自己的算子，
+# 报 "operator torchvision::nms does not exist"。而 transformers.image_utils
+# 在 torchvision 可导入时会无条件 import 它，于是连 AutoModel 都加载不了。
+# 对应关系见 https://github.com/pytorch/pytorch/wiki/PyTorch-Versions
 --extra-index-url https://download.pytorch.org/whl/cu124
 torch==2.6.0
+torchvision==0.21.0
+torchaudio==2.6.0
 
-numpy==1.26.4
+# Colab 已经是 Python 3.13，而 numpy 1.26.4 只出到 cp312，没有 3.13 的 wheel。
+# 硬钉会让 pip 转去源码编译并失败。本项目只用 numpy 存取随机数状态，2.x 完全够用。
+numpy==1.26.4; python_version < "3.13"
+numpy>=2.1,<3; python_version >= "3.13"
 transformers==4.49.0
 accelerate==1.4.0
 peft==0.15.1

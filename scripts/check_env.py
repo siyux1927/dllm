@@ -1,4 +1,9 @@
-"""环境自检：确认 dllm-dev 的依赖版本与 d1 官方 env.yml 对齐，且关键接口可用。"""
+"""环境自检：确认 dllm-dev 的依赖版本与 d1 官方 env.yml 对齐，且关键接口可用。
+
+自检的价值在于把「装到一半坏了但要等真正用的时候才炸」变成「装完立刻说清楚哪儿不对」。
+torchvision 的 ABI 检查就是这么加进来的：只换 torch 不换 torchvision，
+错误会以一条六十行、指向 transformers 内部的 traceback 出现，根本看不出是版本没配对。
+"""
 
 import importlib.metadata as md
 import platform
@@ -14,9 +19,69 @@ EXPECTED = {
     "trl": "0.16.0.dev0",
 }
 
+# torch 与 torchvision / torchaudio 的 C++ 扩展是配对编译的，版本错开就注册不上算子
+# https://github.com/pytorch/pytorch/wiki/PyTorch-Versions
+COMPANIONS = {"2.6.0": {"torchvision": "0.21.0", "torchaudio": "2.6.0"}}
+
+
+def check_torch_companions(torch) -> list[str]:
+    """确认 torchvision 的 C++ 算子真的注册上了。
+
+    判据是算子探针而非版本号。版本对不上未必坏，版本对得上也未必好——真正要紧的是
+    `torchvision::nms` 能不能取到。它取不到时，transformers.image_utils 那句
+    无条件的 `from torchvision import io` 会炸，连 AutoModel 都加载不了，
+    而报出来的 traceback 指向 transformers 内部，看不出病因是版本没配对。
+
+    只有 torchvision 阻断。torchaudio 本项目从头到尾没有任何地方 import，
+    为它挡住整个自检是误报。
+    """
+    failures = []
+    torch_base = torch.__version__.split("+")[0]
+    expected = COMPANIONS.get(torch_base, {})
+    want_vision = expected.get("torchvision")
+
+    for name, want in expected.items():
+        try:
+            actual = md.version(name)
+        except md.PackageNotFoundError:
+            # 没装反而无害：transformers 会跳过相关分支
+            print(f"  {name:<14} 未安装（无害，相关分支会被跳过）")
+            continue
+        matched = actual.split("+")[0] == want
+        note = "ok" if matched else f"期望 {want}（配 torch {torch_base}）"
+        if not matched and name == "torchaudio":
+            note += " —— 仅提示，本项目不用它"
+        print(f"  {name:<14} {actual:<16} {note}")
+
+    fix = (
+        f"pip install torch=={torch_base} torchvision=={want_vision} "
+        "--extra-index-url https://download.pytorch.org/whl/cu124"
+    )
+    try:
+        import torchvision  # noqa: F401
+
+        # 取属性这个动作本身就是探针：算子没注册成功时，这一句会抛 RuntimeError
+        nms_op = torch.ops.torchvision.nms
+        assert nms_op is not None
+    except ModuleNotFoundError:
+        print("  torchvision 算子  未安装 torchvision，跳过")
+    except Exception as exc:  # noqa: BLE001 - 就是要兜住任意底层异常并翻译成人话
+        failures.append(
+            f"torchvision 的算子注册失败（{type(exc).__name__}: {exc}）。"
+            "\n    这是 torch 与 torchvision 的 ABI 不匹配，不是代码问题："
+            "\n    二者的 C++ 扩展配对编译，只换其中一个就会这样。"
+            "\n    transformers.image_utils 会 import torchvision，所以它坏了 AutoModel 就用不了。"
+            f"\n    修复：{fix}"
+        )
+    else:
+        print("  torchvision 算子  torchvision::nms 可用")
+    return failures
+
 
 def main() -> int:
     print(f"python  {platform.python_version()}  ({sys.executable})")
+    if sys.version_info >= (3, 13):
+        print("  注意：Python 3.13。numpy 1.26.4 没有 cp313 的 wheel，requirements 已按版本分流")
 
     failures = []
     for name, expected in EXPECTED.items():
@@ -33,9 +98,26 @@ def main() -> int:
         if not ok:
             failures.append(f"{name}: {actual} != {expected}")
 
+    for name in ("numpy", "torchvision", "torchaudio"):
+        try:
+            print(f"  {name:<14} {md.version(name)}")
+        except md.PackageNotFoundError:
+            print(f"  {name:<14} 未安装")
+
     import torch
 
     print(f"\ntorch.cuda.is_available() = {torch.cuda.is_available()}")
+
+    # 必须在 import transformers / trl 之前查：它们的导入链会踩到 torchvision，
+    # 一旦踩爆，报出来的是一条指向 transformers 内部的 traceback，看不出真正的病因
+    print("\ntorch 配套包检查")
+    companion_failures = check_torch_companions(torch)
+    if companion_failures:
+        print("\n自检失败:")
+        for f in companion_failures:
+            print(f"  - {f}")
+        print("\n后续导入检查已跳过：修好上面的问题再跑一次。")
+        return 1
 
     from trl import GRPOConfig, GRPOTrainer  # noqa: F401
 

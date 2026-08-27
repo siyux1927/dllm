@@ -18,6 +18,10 @@ dependencies:
   - pip:
       - --extra-index-url https://download.pytorch.org/whl/cpu
       - torch==2.6.0
+      # torchvision 必须跟 torch 配对：二者的 C++ 扩展是一起编译的，版本错开会让
+      # torchvision::nms 注册失败，而 transformers.image_utils 会 import torchvision
+      - torchvision==0.21.0
+      - torchaudio==2.6.0
       - numpy==1.26.4
       - transformers==4.49.0
       - accelerate==1.4.0
