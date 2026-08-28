@@ -4,7 +4,9 @@
 配错了却照常跑完是最贵的失败模式：
 
 - `resolve_target_modules` 确认 LoRA 的目标模块名真的能匹配上。LLaDA 派生自 OLMo，
-  线性层未必叫 q_proj / gate_proj，配错时 peft 可能只挂上一部分甚至一个都挂不上。
+  注意力输出叫 attn_out 而非 o_proj，FFN 是 ff_proj / up_proj / ff_out 而非
+  gate/up/down_proj。名字配错时 peft 只在「一个都不命中」时报错，部分命中会静默跳过。
+- `lm_head_exclusion` 把和 FFN 下投影重名的词表投影（都叫 ff_out）排除在 LoRA 之外。
 - `probe_padding_invariance` 确认左侧 padding 不会污染真实位置的输出。LLaDA 官方的
   generate 是按单条或等长 prompt 写的，从没验证过带 padding 的批处理。
 - `probe_lora_is_live` 确认适配器真的参与前向（P0 阶段被这个坑过一次）。
@@ -12,6 +14,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -23,6 +26,13 @@ from dllm.config import Config
 from dllm.train.policy import DEFAULT_ADAPTER, OLD_ADAPTER, Policy
 
 ALL_LINEAR = "all-linear"
+
+# Llama 命名 → LLaDA 命名。d1 官方按 Llama 那套配置 LoRA，右边这三个于是全部落空。
+LLAMA_TO_LLADA = {
+    "o_proj": "attn_out",
+    "gate_proj": "ff_proj",
+    "down_proj": "ff_out",
+}
 
 
 @dataclass
@@ -64,12 +74,55 @@ def resolve_target_modules(model: nn.Module, configured: Sequence[str] | str):
             f"请改配置，或改用 '{ALL_LINEAR}'。"
         )
     if missing:
+        hint = ""
+        renames = {
+            name: LLAMA_TO_LLADA[name]
+            for name in missing
+            if LLAMA_TO_LLADA.get(name) in available
+        }
+        if renames:
+            pairs = "、".join(f"{old} → {new}" for old, new in renames.items())
+            hint = f"\n看起来是用了 Llama 的命名，LLaDA 对应的是: {pairs}"
         raise ValueError(
             f"LoRA target_modules 只匹配上一部分，命中 {matched}，缺失 {missing}。\n"
-            f"该模型的线性层命名为: {dict(available)}\n"
+            f"该模型的线性层命名为: {dict(available)}{hint}\n"
             f"部分命中比全不命中更危险，会得到一个和预期不同却照常训练的模型。"
         )
     return list(matched)
+
+
+def output_embedding_name(model: nn.Module) -> str | None:
+    """词表投影模块的完整名字，找不到就返回 None。
+
+    LLaDA 里它叫 transformer.ff_out，和每个块里的 FFN 下投影 blocks.N.ff_out 重名。
+    PEFT 按名字末段匹配，target_modules 写 "ff_out" 会把这个 [d_model, vocab] 的大矩阵
+    一并挂上 LoRA——r=128 时多出约 1700 万可训练参数，而且训练的是输出分布本身，
+    与「在每个块的线性层上做低秩适配」是两回事。d1 也没有训它。
+    """
+    head = getattr(model, "get_output_embeddings", lambda: None)()
+    if head is None:
+        return None
+    for name, module in model.named_modules():
+        if module is head:
+            return name
+    return None
+
+
+def lm_head_exclusion(model: nn.Module, targets: Sequence[str] | str) -> str | None:
+    """target_modules 会连带命中词表投影时，返回一条只匹配它的正则交给 PEFT 排除。
+
+    必须用正则而不是名字列表。PEFT 的两种排除语义差别很大：
+    列表按名字末段匹配（`key.endswith("." + item)`），字符串按 `re.fullmatch`。
+    走列表就无法表达「只排这一个模块」——填 "ff_out" 会把每个块的 FFN 下投影一起排掉，
+    等于 FFN 压根没挂适配器；填完整路径又只在词表投影恰好嵌套得够深时才安全。
+    全匹配正则与模块在树里的深浅无关，两种情形都对。
+    """
+    name = output_embedding_name(model)
+    if name is None:
+        return None
+    suffix = name.rsplit(".", 1)[-1]
+    hit = targets == ALL_LINEAR or (not isinstance(targets, str) and suffix in targets)
+    return re.escape(name) if hit else None
 
 
 class LLaDAPromptCodec:
@@ -195,6 +248,7 @@ def load_llada(
         lora_alpha=model_cfg.lora_alpha,
         lora_dropout=model_cfg.lora_dropout,
         target_modules=target_modules,
+        exclude_modules=lm_head_exclusion(base, target_modules),
     )
     model = get_peft_model(base, lora)
     # θ_old 是第二个适配器而非独立模型副本，省掉一份 16GB 权重

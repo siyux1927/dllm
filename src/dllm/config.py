@@ -36,14 +36,20 @@ class ModelConfig:
     # 那会让有效学习率变成 4 倍
     lora_alpha: int = 64
     lora_dropout: float = 0.05
+    # LLaDA 的命名（派生自 OLMo），不是 Llama 那套。对应关系：
+    #   attn_out ↔ o_proj、ff_proj ↔ gate_proj、ff_out ↔ down_proj
+    #
+    # d1 官方在这里填的是 Llama 的名字，其中 o_proj / gate_proj / down_proj 对 LLaDA
+    # 一个都匹配不上。PEFT 只在「全不命中」时才报错，部分命中就静默跳过，
+    # 于是官方实际训练的只有 q/k/v/up 四类。差异见 plan-diffu-grpo.md 第 2 节。
     lora_target_modules: tuple[str, ...] = (
         "q_proj",
         "k_proj",
         "v_proj",
-        "o_proj",
-        "gate_proj",
+        "attn_out",
+        "ff_proj",
         "up_proj",
-        "down_proj",
+        "ff_out",
     )
 
 

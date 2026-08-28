@@ -1,9 +1,17 @@
 """供 CPU 单测使用的极小掩码扩散语言模型。
 
 存在的意义是让采样、log-prob 估计、GRPO loss 这些逻辑能在没有 GPU 的机器上跑通全链路。
-接口与结构刻意向 LLaDA 看齐：双向注意力、输出不做位移、线性层命名沿用
-q_proj / k_proj / v_proj / o_proj / gate_proj / up_proj / down_proj，
-这样单测里的 LoRA target_modules 与真实配置是同一份，能提前暴露适配器挂不上的问题。
+接口与结构刻意向 LLaDA 看齐：双向注意力、输出不做位移，线性层命名照抄 LLaDA 的
+q_proj / k_proj / v_proj / attn_out / ff_proj / up_proj / ff_out。
+
+命名这件事踩过一次坑，值得写清楚。这里原本用的是 Llama 那套（o_proj / gate_proj /
+down_proj），因为想当然地以为 LLaDA 也一样。实际上 LLaDA 派生自 OLMo，用的是另一套名字，
+于是替身与真身对不上，「单测里的 target_modules 与真实配置是同一份」这个前提不成立，
+本该在 CPU 上拦下的适配器挂载问题一路跑到了 A100 上才暴露。
+
+模型级的输出投影同样叫 ff_out，和块内的 FFN 下投影重名——这不是笔误，LLaDA 就是这样。
+PEFT 按名字末段匹配，一句 "ff_out" 会连词表投影一起挂上，得靠 exclude 显式排掉。
+替身保留这个重名，才能在 CPU 上测到那段排除逻辑。
 
 注意：这里刻意不用 nn.TransformerEncoderLayer。它在 eval 模式下会走融合快速路径，
 绕过 linear1 / linear2 子模块，导致挂在这些模块上的 LoRA 被静默忽略——
@@ -90,7 +98,7 @@ class TinyAttention(nn.Module):
         self.q_proj = nn.Linear(hidden_size, hidden_size, bias=False)
         self.k_proj = nn.Linear(hidden_size, hidden_size, bias=False)
         self.v_proj = nn.Linear(hidden_size, hidden_size, bias=False)
-        self.o_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.attn_out = nn.Linear(hidden_size, hidden_size, bias=False)
 
     def forward(self, hidden: torch.Tensor, attn_bias: torch.Tensor | None) -> torch.Tensor:
         batch, seq_len, _ = hidden.shape
@@ -101,18 +109,19 @@ class TinyAttention(nn.Module):
         # 不传 is_causal，扩散语言模型是双向注意力
         context = F.scaled_dot_product_attention(query, key, value, attn_mask=attn_bias)
         context = context.transpose(1, 2).reshape(batch, seq_len, -1)
-        return self.o_proj(context)
+        return self.attn_out(context)
 
 
 class TinyMLP(nn.Module):
     def __init__(self, hidden_size: int, intermediate_size: int) -> None:
         super().__init__()
-        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+        # LLaDA 的 SwiGLU：ff_proj 是门控支路，up_proj 是直通支路，ff_out 是下投影
+        self.ff_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
         self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
-        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
+        self.ff_out = nn.Linear(intermediate_size, hidden_size, bias=False)
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-        return self.down_proj(F.silu(self.gate_proj(hidden)) * self.up_proj(hidden))
+        return self.ff_out(F.silu(self.ff_proj(hidden)) * self.up_proj(hidden))
 
 
 class TinyBlock(nn.Module):
@@ -147,7 +156,12 @@ class TinyMaskedDiffusionLM(nn.Module):
             for _ in range(num_layers)
         )
         self.norm = nn.LayerNorm(hidden_size)
-        self.lm_head = nn.Linear(hidden_size, vocab_size, bias=False)
+        # 与块内的 FFN 下投影同名，照抄 LLaDA（weight_tying 关闭时它就叫 transformer.ff_out）
+        self.ff_out = nn.Linear(hidden_size, vocab_size, bias=False)
+
+    def get_output_embeddings(self) -> nn.Module:
+        """LLaDAModelLM 也提供这个方法，是定位词表投影的通用入口。"""
+        return self.ff_out
 
     def forward(
         self,
@@ -167,4 +181,4 @@ class TinyMaskedDiffusionLM(nn.Module):
 
         for layer in self.layers:
             hidden = layer(hidden, attn_bias)
-        return TinyModelOutput(logits=self.lm_head(self.norm(hidden)))
+        return TinyModelOutput(logits=self.ff_out(self.norm(hidden)))

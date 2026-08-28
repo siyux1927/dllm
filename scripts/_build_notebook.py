@@ -224,8 +224,8 @@ md(
 脚本依次做四件事：
 
 1. **装配自检**。确认 LoRA 目标模块真的匹配上了，且改动适配器权重确实改变输出。
-   LLaDA 派生自 OLMo，线性层未必叫 `q_proj`/`gate_proj`；如果这里报错，
-   照它打印出来的真实模块名改配置即可。
+   LLaDA 派生自 OLMo，用的是 `attn_out` / `ff_proj` / `ff_out` 而非 Llama 的
+   `o_proj` / `gate_proj` / `down_proj`；如果这里报错，照它打印出来的真实模块名改配置即可。
 2. **padding 不变性自检**。LLaDA 官方的 generate 是按单条 prompt 写的，从没验证过
    带 padding 的批处理。如果 padding 会泄漏进注意力，同一条 prompt 会因为批内其他
    样本的长度不同而得到不同结果——这种错误不报错，只是让结果不可复现。
