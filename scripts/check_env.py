@@ -78,6 +78,37 @@ def check_torch_companions(torch) -> list[str]:
     return failures
 
 
+def report_version_failures(failures: list[str]) -> int:
+    """把版本不符翻译成下一步该做什么。
+
+    全都不符和只有一个不符，病因完全不同：前者几乎一定是「这个会话里还没装依赖」。
+    Colab 回收运行时后 pip 装的东西全没，Drive 上的文件却还在，
+    于是很容易误以为环境还是上次那个。
+    """
+    print("\n自检失败:")
+    for f in failures:
+        print(f"  - {f}")
+
+    if len(failures) >= len(EXPECTED) - 1:
+        print(
+            "\n几乎所有钉死的包都不对，说明这个会话里还没装依赖——"
+            "\n上面那些是 Colab 的预装版本。"
+            "\nColab 回收运行时后 pip 装的包全部消失（Drive 上的文件不受影响），"
+            "\n所以每开一个新会话都要重装一次："
+            "\n"
+            "\n    !pip install -r requirements-colab.txt"
+            "\n"
+            "\n装完必须重启运行时，再从头跑一遍 notebook。"
+        )
+    else:
+        print(
+            "\n只有部分包不对，多半是某次 pip 把它们升上去了。"
+            "\n重装一次即可：!pip install -r requirements-colab.txt"
+        )
+    print("\n后续导入检查已跳过：这些检查都以钉死的版本为前提。")
+    return 1
+
+
 def main() -> int:
     print(f"python  {platform.python_version()}  ({sys.executable})")
     if sys.version_info >= (3, 13):
@@ -103,6 +134,12 @@ def main() -> int:
             print(f"  {name:<14} {md.version(name)}")
         except md.PackageNotFoundError:
             print(f"  {name:<14} 未安装")
+
+    # 版本不对就到此为止。后面每一项检查都以「装的是钉死的那几个版本」为前提，
+    # 前提不成立还硬往下走，只会拿到一条指向第三方库内部的 traceback——
+    # 那正是这个脚本存在的意义所在，不该由它自己制造。
+    if failures:
+        return report_version_failures(failures)
 
     import torch
 

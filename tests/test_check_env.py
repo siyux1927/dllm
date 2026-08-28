@@ -115,3 +115,53 @@ def test_unknown_torch_version_does_not_crash(check_env, stub_torchvision, monke
 
 def check_torch_ok(check_env, torch) -> bool:
     return check_env.check_torch_companions(torch) == []
+
+
+# --- 版本不符的报告 ---------------------------------------------------------
+#
+# Colab 回收运行时后 pip 装的包全部消失，而 Drive 上的项目文件不受影响，
+# 于是很容易误以为环境还是上次那个。这一组测试锁住「说清楚下一步做什么」这件事。
+
+
+def test_all_packages_wrong_means_deps_were_never_installed(check_env, capsys):
+    """真实遇到过的情形：新会话里跑 check_env，看到的全是 Colab 的预装版本。"""
+    failures = [
+        "torch: 2.11.0+cu128 != 2.6.0",
+        "transformers: 5.15.0 != 4.49.0",
+        "accelerate: 1.14.0 != 1.4.0",
+        "peft: 0.20.0 != 0.15.1",
+        "datasets: 4.0.0 != 3.3.2",
+        "trl: 未安装",
+    ]
+    assert check_env.report_version_failures(failures) == 1
+
+    out = capsys.readouterr().out
+    assert "还没装依赖" in out, "全不对时应指出病因是没装，而不是让人逐个去对版本"
+    assert "pip install -r requirements-colab.txt" in out
+    assert "重启运行时" in out
+
+
+def test_single_mismatch_gets_a_different_diagnosis(check_env, capsys):
+    """只有一个不对，病因不是「没装」而是「被别的包升上去了」，说辞不该一样。"""
+    assert check_env.report_version_failures(["peft: 0.20.0 != 0.15.1"]) == 1
+    out = capsys.readouterr().out
+    assert "还没装依赖" not in out
+    assert "部分包不对" in out
+
+
+def test_version_failures_stop_before_importing_anything(check_env, monkeypatch, capsys):
+    """核心断言：版本不对就到此为止，不要再去 import trl。
+
+    此前的实现已经记下了「trl 未安装」，却仍然往下走 `from trl import ...`，
+    于是甩出一条 ModuleNotFoundError 的 traceback。自检脚本存在的意义就是不让人看
+    这种东西，它自己更不该制造。
+    """
+    monkeypatch.setattr(check_env.md, "version", lambda name: "999.0.0")
+
+    def explode(*args, **kwargs):
+        raise AssertionError("版本不符时不应触及 torch / trl 的导入")
+
+    monkeypatch.setattr(check_env, "check_torch_companions", explode)
+
+    assert check_env.main() == 1
+    assert "后续导入检查已跳过" in capsys.readouterr().out

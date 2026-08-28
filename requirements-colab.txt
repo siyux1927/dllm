@@ -41,5 +41,6 @@ wandb
 # 不装的东西，以及原因：
 #   bitsandbytes  —— 已决定用 bf16 而非 4-bit（见 plan-diffu-grpo.md 第 2 节）
 #   deepspeed     —— 单卡不需要 ZeRO
-#   flash-attn    —— Colab 上编译要 20 分钟以上且易与 torch 版本冲突，
-#                    LLaDA 是双向注意力，attn_implementation="sdpa" 完全够用
+#   flash-attn    —— Colab 上编译要 20 分钟以上且易与 torch 版本冲突；
+#                    况且 LLaDAModelLM 压根不接受 HF 的 attn_implementation 派发，
+#                    装了也用不上（它自己内部调 F.scaled_dot_product_attention）

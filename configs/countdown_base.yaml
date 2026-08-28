@@ -4,7 +4,7 @@
 model:
   model_path: GSAI-ML/LLaDA-8B-Instruct
   torch_dtype: bfloat16
-  attn_implementation: sdpa      # 官方 flash_attention_2，Colab 上编译慢且易冲突
+  attn_implementation: eager     # 只能填 eager，理由见 config.py；不影响性能
   trust_remote_code: true
   mask_token_id: 126336
   lora_r: 128

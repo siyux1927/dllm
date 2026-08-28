@@ -52,7 +52,7 @@
 | completion 长度 | 256 | **128** | Countdown 答案是一个算式，不需要长推理链 |
 | diffusion_steps | 128 | **64** | 配合 block_length=32，每块 16 步、每步解 2 token |
 | checkpoint 频率 | 每 100 步 | **每 25 步** | Colab 会断线，100 步意味着可能丢 2.5 小时 |
-| attention | flash_attention_2 | **sdpa** | Colab 上编译 flash-attn 要 20 分钟以上且易与 torch 版本冲突；LLaDA 是双向注意力，sdpa 完全够用 |
+| attention | flash_attention_2 | **eager** | 不是取舍，是唯一选项：`LLaDAModelLM` 不参与 HF 的 attn 派发，非 eager 一律 `ValueError`。也没有性能损失，它内部本来就在调 `F.scaled_dot_product_attention`。顺带省掉 flash-attn 在 Colab 上 20 分钟的编译 |
 
 ### 提速效果核算
 
@@ -78,7 +78,7 @@
 |---|---|---|
 | `model_path` | `GSAI-ML/LLaDA-8B-Instruct` | 需 `trust_remote_code=True` |
 | `torch_dtype` | `bfloat16` | |
-| `attn_implementation` | `sdpa` | 偏离官方 |
+| `attn_implementation` | `eager` | **只能填这个**。`LLaDAModelLM` 未声明 `_supports_sdpa`，填 `sdpa` / `flash_attention_2` 会抛 `ValueError`。不影响性能：LLaDA 远端代码自己就在调 `F.scaled_dot_product_attention`，HF 这个参数管不到它 |
 | mask token id | `126336` | LLaDA 特有，自实现采样循环时勿写错 |
 | `lora_r` | 128 | |
 | `lora_alpha` | 64 | **不要改**。alpha < r 意味着缩放系数 0.5，不是常见的 alpha=2r。按习惯改会让有效学习率翻 4 倍 |
@@ -268,7 +268,7 @@ P0 阶段暴露的问题（已修）：
 | **奖励 hacking** | 中 | 格式与正确性奖励分开记录；定期人工抽查生成样本 |
 | **200 步不够看出趋势** | 中 | 优先保证 P2（离线、便宜、必出结果）；P3 曲线不动时先查 ratio 分布而非加步数 |
 | **Fast-dLLM 接入有坑** | 中 | 双向注意力的近似 cache 有 mask 对齐与块边界问题；兜底是直接复用官方实现的 cache 部分，精力集中在第 4 幕的偏差量化上 |
-| **flash-attn 编译失败** | 低 | 直接用 sdpa，已写进配置 |
+| **flash-attn 编译失败** | 低 | 不装，配置里用 eager；LLaDA 本就不接受 HF 的 attn 派发，装了也白装 |
 
 ---
 
@@ -316,7 +316,7 @@ HF 缓存指向 Drive，避免每次 session 重下 16GB 权重：
 HF_HOME=/content/drive/MyDrive/hf_cache
 ```
 
-明确不装的三样：`bitsandbytes`（已改用 bf16）、`deepspeed`（单卡不需要）、`flash-attn`（编译慢且易冲突，用 sdpa 替代）。
+明确不装的三样：`bitsandbytes`（已改用 bf16）、`deepspeed`（单卡不需要）、`flash-attn`（编译慢，且 LLaDA 根本不接受 HF 的 attn 派发，装了用不上）。
 
 ---
 

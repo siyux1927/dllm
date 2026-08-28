@@ -20,9 +20,14 @@ LLADA_MASK_TOKEN_ID = 126336
 class ModelConfig:
     model_path: str = "GSAI-ML/LLaDA-8B-Instruct"
     torch_dtype: str = "bfloat16"
-    # 官方用 flash_attention_2；Colab 上编译耗时且易与 torch 版本冲突，
-    # 而 LLaDA 是双向注意力，sdpa 完全够用
-    attn_implementation: str = "sdpa"
+    # 只能是 eager，别改成 sdpa 或 flash_attention_2，会直接抛 ValueError。
+    #
+    # LLaDAModelLM 是 trust_remote_code 加载的自定义架构，没有声明 _supports_sdpa，
+    # 于是 transformers 的 attn dispatch 一律拒绝。而这个值实际上无关性能：
+    # LLaDA 的远端代码（改自 OLMo）在自己的 attention 里直接调
+    # F.scaled_dot_product_attention，走的什么核由它自己决定，HF 这个参数管不着。
+    # 换句话说填 eager 并不会退化成朴素实现，只是把 HF 的 dispatch 让开而已。
+    attn_implementation: str = "eager"
     trust_remote_code: bool = True
     mask_token_id: int = LLADA_MASK_TOKEN_ID
 
