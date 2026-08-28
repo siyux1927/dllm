@@ -7,8 +7,9 @@
   注意力输出叫 attn_out 而非 o_proj，FFN 是 ff_proj / up_proj / ff_out 而非
   gate/up/down_proj。名字配错时 peft 只在「一个都不命中」时报错，部分命中会静默跳过。
 - `lm_head_exclusion` 把和 FFN 下投影重名的词表投影（都叫 ff_out）排除在 LoRA 之外。
-- `probe_padding_invariance` 确认左侧 padding 不会污染真实位置的输出。LLaDA 官方的
-  generate 是按单条或等长 prompt 写的，从没验证过带 padding 的批处理。
+- `probe_padding_invariance` 量左侧 padding 对真实位置输出的影响。LLaDA 会忽略
+  attention_mask，所以它在真实模型上必然不通过——留着是为了发现「情况变了」，
+  不是为了发现问题。详见该函数的说明。
 - `probe_lora_is_live` 确认适配器真的参与前向（P0 阶段被这个坑过一次）。
 """
 
@@ -175,16 +176,18 @@ def probe_padding_invariance(
 ) -> float:
     """同一条 prompt 补上不同长度的 padding，比较真实位置上 logits 的最大差异。
 
-    返回值应接近 0。明显大于 0 有两种成因，都会影响结果但严重程度不同：
+    返回值应接近 0。**在 LLaDA 上它不会接近 0，这一点已经查清并接受**：
+    LLaDAModel.forward 把 attention_mask 算成加性 bias 后随即丢弃（紧跟一行
+    attention_bias = None），传了等于没传，真实 token 确实会注意到 padding。
+    RoPE 只依赖相对位置，可以排除「位置编码随 padding 平移」这一成因。
 
-    1. **padding 泄漏进注意力**。attention_mask 没起作用，真实 token 看到了 padding。
-       这是硬伤，必须修。
-    2. **位置编码随 padding 平移**。用可学习的绝对位置嵌入时，左侧补齐会把真实 token
-       整体后移，位置嵌入随之改变。RoPE 只依赖相对位置，不受影响。
+    既然如此为什么还留着这个探针：它现在的职责从「发现问题」变成「发现变化」。
+    补齐到固定的 max_prompt_length 使每行 padding 量恒定，可复现性不受影响；
+    d1 官方也没处理，保持一致才可比，所以不修（取舍见 plan-diffu-grpo.md 第 2 节）。
+    但如果 GSAI-ML 哪天补上了掩码、或换了模型、或 codec 改成按批内最大长度补齐，
+    这个数字会动——那时才需要重新判断。
 
-    本项目把所有 prompt 补齐到固定的 max_prompt_length（而非批内最大长度），
-    所以即便存在成因 2，同一条 prompt 的 padding 量也始终相同，结果仍可复现；
-    代价只是短 prompt 被推到靠后的绝对位置。成因 1 则没有这种回旋余地。
+    小模型是另一回事：它用可学习的绝对位置嵌入，差异来自位置平移而非注意力泄漏。
     """
     ids = codec.tokenizer(codec._render(prompt), add_special_tokens=False)["input_ids"]
     device = next(model.parameters()).device

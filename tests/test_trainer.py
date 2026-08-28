@@ -21,9 +21,11 @@ from dllm.config import (
     SamplingConfig,
 )
 from dllm.data.countdown import build_countdown_dataset
+from dllm.models.llada import lm_head_exclusion
 from dllm.models.tiny import TinyMaskedDiffusionLM
 from dllm.rewards.countdown import RewardBreakdown, batch_rewards
 from dllm.train.checkpoint import load_checkpoint, mirror_checkpoint
+from dllm.train import loop as loop_module
 from dllm.train.loop import DiffuGRPOTrainer, PromptSampler, completion_mask_from_eos
 from dllm.train.policy import Policy
 
@@ -87,14 +89,19 @@ def make_config(**overrides) -> Config:
     return config
 
 
-def make_trainer(reward_fn=stub_reward_fn, decode_fn=None, **overrides) -> DiffuGRPOTrainer:
+def make_trainer(
+    reward_fn=stub_reward_fn, decode_fn=None, device: str = "cpu", **overrides
+) -> DiffuGRPOTrainer:
     torch.manual_seed(0)
     base = TinyMaskedDiffusionLM(vocab_size=VOCAB_SIZE, hidden_size=32, num_layers=2)
+    targets = list(ModelConfig().lora_target_modules)
     lora = peft.LoraConfig(
         r=4,
         lora_alpha=4,
         lora_dropout=0.0,
-        target_modules=list(ModelConfig().lora_target_modules),
+        target_modules=targets,
+        # 与 load_llada 保持一致：不这样写，冒烟测试跑的就不是线上那套装配
+        exclude_modules=lm_head_exclusion(base, targets),
     )
     model = peft.get_peft_model(base, lora)
     model.add_adapter("old", lora)
@@ -112,8 +119,93 @@ def make_trainer(reward_fn=stub_reward_fn, decode_fn=None, **overrides) -> Diffu
         decode_fn=decode_fn or tokenizer.decode,
         reward_fn=reward_fn,
         mask_id=MASK_ID,
+        device=device,
         eos_token_id=EOS_ID,
     )
+
+
+# --- 采样生成器与设备 -------------------------------------------------------
+#
+# 这一组全部在 CPU 上跑，却守着只在 GPU 上才会犯的错。
+# 上一次同类问题（LoRA 目标模块用了 Llama 命名）是靠 A100 上加载权重才暴露的；
+# 教训是「本地测不到的维度」要用替身或探针补上，而不是等真机。
+
+
+def test_generator_is_built_on_the_trainer_device(monkeypatch):
+    """生成器跟随 trainer 的设备，不能写死 cpu。
+
+    写死 cpu 时，GPU 上 torch.rand(device="cuda", generator=cpu_gen) 会直接报错。
+    本机可能没有 GPU，所以拦截构造调用看它拿到的 device，而不是真的建一个 CUDA 生成器。
+    """
+    real_generator = torch.Generator
+    requested: list[torch.device] = []
+
+    def spy(device="cpu"):
+        requested.append(torch.device(device))
+        return real_generator()
+
+    monkeypatch.setattr(torch, "Generator", spy)
+    make_trainer(device="cuda")
+
+    assert requested, "trainer 应当构造一个采样生成器"
+    assert requested[-1].type == "cuda"
+
+
+def test_prompt_masking_always_gets_the_seeded_generator(monkeypatch):
+    """prompt 掩码必须用 trainer 的生成器采，不许退化成 None。
+
+    传 None 不会报错，只是改用全局 RNG——run.seed 对这段悄悄失效，训练不再可复现。
+
+    坦白这条测试的边界：它只能验证在 CPU 上走到的那条分支。此前的实现写的是
+    `generator=self.generator if batch.prompt_ids.is_cpu else None`，在 CPU 上恰好
+    命中正确分支，本测试照样会绿。真正堵住那个洞的是上面那条设备测试——
+    生成器一旦跟随 self.device 构造，就不再有写设备分支的动机。
+    """
+    trainer = make_trainer()
+    seen: list[object] = []
+    real_sampler = loop_module.sample_prompt_mask
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("generator"))
+        return real_sampler(*args, **kwargs)
+
+    monkeypatch.setattr(loop_module, "sample_prompt_mask", spy)
+    trainer.step()
+
+    assert seen, "random_masking 默认开启，应当被调用"
+    assert all(g is trainer.generator for g in seen)
+
+
+def test_cross_device_resume_reseeds_instead_of_crashing():
+    """跨设备续训要能继续跑，并且明说随机数流已经变了。
+
+    CUDA 与 CPU 生成器的状态字节格式不同。Colab 掉线重连是常态，
+    为了一段随机数流让人丢掉几小时训练不值得——但也不能默不作声。
+    """
+    trainer = make_trainer()
+    trainer.step()
+    state = trainer.state_dict()
+    state["generator_device"] = "cuda"  # 伪装成 GPU 上存下的 checkpoint
+
+    fresh = make_trainer()
+    with pytest.warns(RuntimeWarning, match="随机数流"):
+        fresh.load_state_dict(state)
+
+    assert fresh.step_index == trainer.step_index, "训练进度仍应恢复"
+
+
+def test_same_device_resume_restores_the_exact_stream():
+    """设备一致时不许走降级分支，随机数流必须逐位恢复。"""
+    trainer = make_trainer()
+    trainer.step()
+    state = trainer.state_dict()
+
+    fresh = make_trainer()
+    fresh.load_state_dict(state)
+
+    expected = torch.rand(4, generator=trainer.generator)
+    actual = torch.rand(4, generator=fresh.generator)
+    assert torch.equal(expected, actual)
 
 
 def test_completion_mask_stops_after_first_eos():

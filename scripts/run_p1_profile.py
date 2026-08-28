@@ -268,13 +268,17 @@ def main() -> None:
     )
     print(f"不同 padding 长度下补全位置 logits 的最大差异: {leak:.4f}")
     if leak > PADDING_LEAK_TOLERANCE:
-        print("  未通过。两种可能：")
-        print("    a) attention_mask 没生效，真实 token 看到了 padding —— 硬伤，必须修")
-        print("    b) 位置编码随 padding 平移（可学习的绝对位置嵌入会这样，RoPE 不会）")
-        print("  本项目补齐到固定的 max_prompt_length 而非批内最大长度，所以 (b) 不破坏")
-        print("  可复现性，只是让短 prompt 落在靠后的绝对位置；(a) 则必须改等长分组。")
         if args.tiny:
-            print("  小模型用的正是可学习绝对位置嵌入，这里报 (b) 属预期，与 LLaDA 无关。")
+            print("  小模型用可学习的绝对位置嵌入，左侧补齐会整体后移真实 token。")
+            print("  属预期，与 LLaDA 无关。")
+        else:
+            print("  未通过——这是 LLaDA 的已知行为，不是本项目的 bug，也不必去修：")
+            print("    LLaDAModel.forward 把 attention_mask 算成加性 bias 后随即丢弃")
+            print("    （紧跟一行 attention_bias = None），传了等于没传。")
+            print("  不破坏可复现性：补齐到固定 max_prompt_length，每行 padding 量只由")
+            print("  自身 prompt 长度决定。代价是真实 token 会注意到 padding，补全质量")
+            print("  被系统性拉低——但 d1 官方同样如此，保持一致才可比。")
+            print("  取舍与备选方案见 docs/plan-diffu-grpo.md 第 2 节。")
     else:
         print("  通过：左侧 padding 不影响真实位置的输出")
     report["padding_leak"] = leak

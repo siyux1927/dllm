@@ -53,6 +53,7 @@
 | diffusion_steps | 128 | **64** | 配合 block_length=32，每块 16 步、每步解 2 token |
 | checkpoint 频率 | 每 100 步 | **每 25 步** | Colab 会断线，100 步意味着可能丢 2.5 小时 |
 | LoRA target modules | 写的是 `q/k/v/o_proj/up/down/gate_proj`，**实际只有 `q/k/v/up_proj` 生效** | **七类全挂**（`q/k/v/attn_out/ff_proj/up_proj/ff_out`） | 官方那份是 Llama 命名，`o_proj`/`gate_proj`/`down_proj` 在 LLaDA 上一个都匹配不上；PEFT 仅在全不命中时报错，部分命中静默跳过，于是注意力输出投影和整个 FFN 都没训到。本项目按其**意图**补齐，可训练参数因此约为官方实际值的两倍（1.68 亿 → 3.36 亿）。要严格对齐官方**实测**基线，改回 `["q_proj","k_proj","v_proj","up_proj"]` 即可 |
+| batch 内的 padding | 未处理 | **同样不处理**（已查清并接受） | `LLaDAModel.forward` 把 `attention_mask` 算成加性 bias 后随即丢弃（紧跟 `attention_bias = None`），且外部无法注入掩码，所以真实 token 会注意到 padding。补齐到固定 `max_prompt_length` 使每行 padding 量恒定，**不破坏可复现性**，代价是补全质量被系统性拉低。修它有两条路——按 prompt 分组（只修得了生成阶段，loss 阶段仍要堆成单张量）、包一层 `block.forward` 注入 bias（两阶段一起修、不影响 GPU 利用率，但依赖远端代码结构）。**均不采用**：污染在 P3 与 P4 中完全一致，会在最终要测的差值里抵消；而多一处偏离会让「曲线对不上」更难归因 |
 | attention | flash_attention_2 | **eager** | 不是取舍，是唯一选项：`LLaDAModelLM` 不参与 HF 的 attn 派发，非 eager 一律 `ValueError`。也没有性能损失，它内部本来就在调 `F.scaled_dot_product_attention`。顺带省掉 flash-attn 在 Colab 上 20 分钟的编译 |
 
 ### 提速效果核算

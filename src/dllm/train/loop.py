@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -157,7 +158,10 @@ class DiffuGRPOTrainer:
         self.sampler = PromptSampler(
             len(self.problems), config.grpo.num_prompts_per_step, config.run.seed
         )
-        self.generator = torch.Generator(device="cpu").manual_seed(config.run.seed)
+        # 生成器必须与它产生的张量同设备，torch.rand(device="cuda", generator=cpu_gen)
+        # 会直接报错。写死 cpu 的代价不只是崩：谁在 GPU 上撞见这个错误，
+        # 最省事的补法就是「非 CPU 就传 None」，而那会悄悄关掉 seed 控制。
+        self.generator = torch.Generator(device=self.device).manual_seed(config.run.seed)
         self.step_index = 0
 
     def _build_optimizer(self) -> torch.optim.Optimizer:
@@ -237,7 +241,7 @@ class DiffuGRPOTrainer:
                     batch.prompt_ids,
                     grpo.p_mask_prompt,
                     batch.prompt_attention_mask,
-                    generator=self.generator if batch.prompt_ids.is_cpu else None,
+                    generator=self.generator,
                 )
 
             estimator_kwargs = {
@@ -380,6 +384,8 @@ class DiffuGRPOTrainer:
             "scheduler": self.scheduler.state_dict() if self.scheduler is not None else None,
             "sampler": self.sampler.state_dict(),
             "generator": self.generator.get_state(),
+            # CUDA 与 CPU 生成器的状态格式不同，跨设备恢复要能认出来
+            "generator_device": self.device.type,
             "rng": rng_state(),
             "config": self.config.to_dict(),
         }
@@ -391,8 +397,29 @@ class DiffuGRPOTrainer:
         if self.scheduler is not None and state["scheduler"] is not None:
             self.scheduler.load_state_dict(state["scheduler"])
         self.sampler.load_state_dict(state["sampler"])
-        self.generator.set_state(state["generator"])
+        self._restore_generator(state)
         load_rng_state(state["rng"])
+
+    def _restore_generator(self, state: dict[str, Any]) -> None:
+        """恢复采样生成器，跨设备时退回按种子重建。
+
+        CUDA 与 CPU 生成器的状态字节格式不同，直接 set_state 会抛一条指向 torch 内部的
+        错误。断点续训是这个项目的核心场景（Colab 必然掉线），不能为了一段随机数流
+        就让人丢掉几小时的训练——所以这里降级而不是报错，但必须说清楚流已经变了。
+        """
+        saved_device = state.get("generator_device", "cpu")
+        if saved_device == self.device.type:
+            self.generator.set_state(state["generator"])
+            return
+        seed = self.config.run.seed + self.step_index
+        self.generator.manual_seed(seed)
+        warnings.warn(
+            f"checkpoint 的采样生成器来自 {saved_device}，当前是 {self.device.type}，"
+            f"状态格式不兼容。已按 seed={seed} 重建：训练可以继续，"
+            f"但随机数流与原次运行不再一致，逐步复现会对不上。",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     def save(self, directory: str | Path) -> Path:
         return save_checkpoint(directory, self.state_dict())
