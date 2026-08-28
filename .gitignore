@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# 训练产物：checkpoints 单个就有数 GB，results 每次运行都会重写
+checkpoints/
+results/
+
+# 环境
+.venv/
+venv/
+*.egg-info/
+.env
