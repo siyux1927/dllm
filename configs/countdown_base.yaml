@@ -33,6 +33,7 @@ grpo:
   scale_rewards: true
   reward_format_weight: 0.2
   reward_correct_weight: 1.0
+  micro_batch_size: 4            # 显存开关，梯度与全批 24 条逐位相等；24 条会 OOM
 
 optim:
   learning_rate: 3.0e-6

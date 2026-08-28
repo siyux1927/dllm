@@ -107,6 +107,13 @@ class GRPOConfig:
     reward_format_weight: float = 0.2
     reward_correct_weight: float = 1.0
 
+    # 纯显存开关，梯度与全批逐位相等；A100-40GB 上 24 条会 OOM，激活约 1.7GB/条
+    micro_batch_size: int = 4
+
+    @property
+    def rollout_size(self) -> int:
+        return self.num_prompts_per_step * self.num_generations
+
 
 @dataclass
 class OptimConfig:

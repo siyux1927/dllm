@@ -227,6 +227,43 @@ class DiffuGRPOTrainer:
             num_forward_passes=output.num_forward_passes,
         )
 
+    def _accumulate_grads(
+        self,
+        estimator_kwargs: dict,
+        logp_old: torch.Tensor,
+        logp_ref: torch.Tensor | None,
+        batch: RolloutBatch,
+    ) -> torch.Tensor:
+        """按微批累积梯度，返回拼回全批的 detached logp_new。
+
+        梯度与一次算完整批**逐位相等**，不是近似：grpo_loss 的归一化是「每条序列先除自己的
+        token 数，再对 B 条取平均」，故全批损失 = (1/B)·Σ 各序列损失，每个微批乘 m/B 累加即得。
+        拆批的唯一目的是别让 32 层的激活同时驻留——A100-40GB 上整批 24 条要 40GB 以上。
+        """
+        grpo = self.config.grpo
+        total = logp_old.shape[0]
+        size = max(1, min(grpo.micro_batch_size, total))
+        chunks = []
+        for start in range(0, total, size):
+            end = min(start + size, total)
+            sliced = {
+                key: (value[start:end] if isinstance(value, torch.Tensor) else value)
+                for key, value in estimator_kwargs.items()
+            }
+            logp_mb = one_step_token_logprobs(self.policy.model, **sliced)
+            loss_mb, _ = grpo_loss(
+                logp_mb,
+                logp_old[start:end],
+                batch.advantages[start:end],
+                batch.completion_mask[start:end],
+                epsilon=grpo.epsilon,
+                beta=grpo.beta,
+                logp_ref=None if logp_ref is None else logp_ref[start:end],
+            )
+            (loss_mb * (end - start) / total).backward()
+            chunks.append(logp_mb.detach())
+        return torch.cat(chunks, dim=0)
+
     def optimize(self, batch: RolloutBatch) -> dict[str, float]:
         grpo = self.config.grpo
         self.policy.sync_old()
@@ -261,18 +298,21 @@ class DiffuGRPOTrainer:
                         logp_ref = one_step_token_logprobs(ref_model, **estimator_kwargs)
 
             with self.timer.phase("forward_backward"):
-                logp_new = one_step_token_logprobs(self.policy.model, **estimator_kwargs)
-                loss, stats = grpo_loss(
-                    logp_new,
-                    logp_old,
-                    batch.advantages,
-                    batch.completion_mask,
-                    epsilon=grpo.epsilon,
-                    beta=grpo.beta,
-                    logp_ref=logp_ref,
-                )
                 self.optimizer.zero_grad(set_to_none=True)
-                loss.backward()
+                logp_new = self._accumulate_grads(
+                    estimator_kwargs, logp_old, logp_ref, batch
+                )
+                # 统计量用拼回来的全批 logp 重算，避免逐微批取平均后 ratio_std 之类失真
+                with torch.no_grad():
+                    _, stats = grpo_loss(
+                        logp_new,
+                        logp_old,
+                        batch.advantages,
+                        batch.completion_mask,
+                        epsilon=grpo.epsilon,
+                        beta=grpo.beta,
+                        logp_ref=logp_ref,
+                    )
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     self.policy.trainable_parameters(), self.config.optim.max_grad_norm
                 )

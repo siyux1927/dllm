@@ -21,6 +21,7 @@ from dllm.config import (
     SamplingConfig,
 )
 from dllm.data.countdown import build_countdown_dataset
+from dllm.logprob.estimators import one_step_token_logprobs
 from dllm.models.llada import lm_head_exclusion
 from dllm.models.tiny import TinyMaskedDiffusionLM
 from dllm.rewards.countdown import RewardBreakdown, batch_rewards
@@ -474,6 +475,46 @@ def test_checkpoint_reports_size_and_duration(tmp_path):
     stats = trainer.checkpoint()
     assert stats["checkpoint/size_mb"] > 0
     assert stats["checkpoint/local_s"] >= 0
+
+
+def test_microbatching_does_not_change_gradients():
+    """微批只该省显存，不该改梯度。
+
+    A100-40GB 装不下整批 24 条的激活，于是拆微批累积。这一步靠 grpo_loss 的归一化
+    （每条序列先除自己的 token 数、再对 B 条取平均）才能做到逐位相等；
+    哪天归一化改成「按全批 token 总数平均」，等价性就悄悄没了，训练照跑但梯度是错的。
+    """
+    trainer = make_trainer()
+    # 必须解开贪心采样：temperature=0 时组内补全逐字节相同，优势全零，梯度也全零
+    trainer.config.sampling.temperature = 1.0
+    batch = trainer.rollout(trainer.sampler.next_indices())
+    assert batch.advantages.abs().sum() > 0, "优势全零，压不到策略梯度"
+    kwargs = {
+        "prompt_ids": batch.prompt_ids,
+        "completion_ids": batch.completion_ids,
+        "mask_id": trainer.mask_id,
+        "prompt_mask": None,
+        "attention_mask": batch.prompt_attention_mask,
+    }
+    with trainer.policy.as_old() as old_model:
+        logp_old = one_step_token_logprobs(old_model, **kwargs)
+    with trainer.policy.as_ref() as ref_model:
+        logp_ref = one_step_token_logprobs(ref_model, **kwargs)
+
+    def grads_with(size):
+        trainer.config.grpo.micro_batch_size = size
+        trainer.optimizer.zero_grad(set_to_none=True)
+        trainer._accumulate_grads(kwargs, logp_old, logp_ref, batch)
+        return [p.grad.clone() for p in trainer.policy.trainable_parameters()]
+
+    total = logp_old.shape[0]
+    assert total > 1, "整批只有一条时这条测试什么也证明不了"
+    full = grads_with(total)
+    micro = grads_with(1)
+
+    assert any(g.abs().sum() > 0 for g in full), "梯度全零，测试等于没测"
+    for one, many in zip(full, micro, strict=True):
+        torch.testing.assert_close(many, one, rtol=1e-4, atol=1e-6)
 
 
 def _steps(trainer, count):
