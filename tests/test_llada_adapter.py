@@ -13,6 +13,7 @@ from dllm.models.llada import (
     ALL_LINEAR,
     LLaDAPromptCodec,
     linear_module_suffixes,
+    lm_head_exclusion,
     probe_lora_is_live,
     resolve_target_modules,
 )
@@ -51,8 +52,8 @@ def test_linear_suffixes_match_llada_style_naming():
 
 def test_resolve_accepts_matching_modules():
     model = TinyMaskedDiffusionLM(hidden_size=32, num_layers=2)
-    resolved = resolve_target_modules(model, ["q_proj", "o_proj"])
-    assert resolved == ["q_proj", "o_proj"]
+    resolved = resolve_target_modules(model, ["q_proj", "attn_out"])
+    assert resolved == ["q_proj", "attn_out"]
 
 
 def test_resolve_passes_through_all_linear():
@@ -61,10 +62,9 @@ def test_resolve_passes_through_all_linear():
 
 
 def test_resolve_rejects_completely_wrong_names():
-    """LLaDA 派生自 OLMo，线性层可能叫 att_proj / ff_proj。配错时必须报错并列出真实命名。"""
     model = TinyMaskedDiffusionLM(hidden_size=32, num_layers=2)
     with pytest.raises(ValueError, match="一个都匹配不上") as exc:
-        resolve_target_modules(model, ["att_proj", "ff_proj"])
+        resolve_target_modules(model, ["att_proj", "wqkv"])
     assert "q_proj" in str(exc.value), "报错里应给出候选名单"
 
 
@@ -73,6 +73,84 @@ def test_resolve_rejects_partial_match():
     model = TinyMaskedDiffusionLM(hidden_size=32, num_layers=2)
     with pytest.raises(ValueError, match="只匹配上一部分"):
         resolve_target_modules(model, ["q_proj", "att_proj"])
+
+
+def test_llama_names_are_rejected_with_the_llada_translation():
+    """d1 官方原样填的就是这份 Llama 命名，对 LLaDA 只命中 q/k/v/up。
+
+    静默少挂三类模块，训练照跑、曲线照有，只是模型和以为的不是同一个。
+    报错必须给出改名方案，否则下一个人还得再查一遍 OLMo 的源码。
+    """
+    model = TinyMaskedDiffusionLM(hidden_size=32, num_layers=2)
+    d1_official = ["q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "down_proj", "gate_proj"]
+    with pytest.raises(ValueError, match="只匹配上一部分") as exc:
+        resolve_target_modules(model, d1_official)
+
+    message = str(exc.value)
+    assert "o_proj → attn_out" in message
+    assert "gate_proj → ff_proj" in message
+    assert "down_proj → ff_out" in message
+
+
+def test_config_default_targets_all_resolve():
+    """配置里的默认目标必须在结构与 LLaDA 对齐的替身上全部命中。"""
+    model = TinyMaskedDiffusionLM(hidden_size=32, num_layers=2)
+    targets = list(ModelConfig().lora_target_modules)
+    assert resolve_target_modules(model, targets) == targets
+
+
+# --- 词表投影与 FFN 下投影重名 -----------------------------------------------
+
+
+def test_lm_head_shares_its_name_with_the_ffn_down_projection():
+    """替身必须保留 LLaDA 这个重名，否则下面那条排除逻辑在 CPU 上根本测不到。"""
+    model = TinyMaskedDiffusionLM(hidden_size=32, num_layers=2)
+    assert linear_module_suffixes(model)["ff_out"] == 3, "2 个块内下投影 + 1 个词表投影"
+
+
+def test_targeting_ff_out_excludes_only_the_vocab_projection():
+    """排除项是全匹配正则，只咬住词表投影本身，块内的同名下投影不受影响。"""
+    import re
+
+    model = TinyMaskedDiffusionLM(hidden_size=32, num_layers=2)
+    pattern = lm_head_exclusion(model, ["q_proj", "ff_out"])
+    assert re.fullmatch(pattern, "ff_out")
+    assert not re.fullmatch(pattern, "layers.0.mlp.ff_out")
+
+
+def test_no_exclusion_when_ff_out_is_not_targeted():
+    model = TinyMaskedDiffusionLM(hidden_size=32, num_layers=2)
+    assert lm_head_exclusion(model, ["q_proj", "attn_out"]) is None
+
+
+def test_vocab_projection_stays_frozen_while_block_projections_train():
+    """这条才是真正要守的东西：排除词表投影，但不能把块内的下投影一起排掉。
+
+    PEFT 的排除规则和匹配规则一样是按名字末段，排除项若写成 "ff_out"，
+    会把每个块的 FFN 下投影也一并排掉——等于 FFN 根本没挂上适配器，而且悄无声息。
+    """
+    model = TinyMaskedDiffusionLM(hidden_size=32, num_layers=2)
+    targets = list(ModelConfig().lora_target_modules)
+    wrapped = peft.get_peft_model(
+        model,
+        peft.LoraConfig(
+            r=4,
+            lora_alpha=4,
+            lora_dropout=0.0,
+            target_modules=targets,
+            exclude_modules=lm_head_exclusion(model, targets),
+        ),
+    )
+    adapted = {
+        name.rsplit(".lora_A", 1)[0]
+        for name, _ in wrapped.named_modules()
+        if name.endswith("lora_A")
+    }
+    assert not any(name.endswith("base_model.model.ff_out") for name in adapted), (
+        "词表投影不该被挂上 LoRA"
+    )
+    block_downs = [name for name in adapted if ".mlp.ff_out" in name]
+    assert len(block_downs) == 2, f"两个块的 FFN 下投影都该挂上，实际 {sorted(adapted)}"
 
 
 def test_codec_left_pads_to_fixed_length():

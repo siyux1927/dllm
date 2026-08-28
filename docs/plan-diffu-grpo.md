@@ -52,6 +52,7 @@
 | completion 长度 | 256 | **128** | Countdown 答案是一个算式，不需要长推理链 |
 | diffusion_steps | 128 | **64** | 配合 block_length=32，每块 16 步、每步解 2 token |
 | checkpoint 频率 | 每 100 步 | **每 25 步** | Colab 会断线，100 步意味着可能丢 2.5 小时 |
+| LoRA target modules | 写的是 `q/k/v/o_proj/up/down/gate_proj`，**实际只有 `q/k/v/up_proj` 生效** | **七类全挂**（`q/k/v/attn_out/ff_proj/up_proj/ff_out`） | 官方那份是 Llama 命名，`o_proj`/`gate_proj`/`down_proj` 在 LLaDA 上一个都匹配不上；PEFT 仅在全不命中时报错，部分命中静默跳过，于是注意力输出投影和整个 FFN 都没训到。本项目按其**意图**补齐，可训练参数因此约为官方实际值的两倍（1.68 亿 → 3.36 亿）。要严格对齐官方**实测**基线，改回 `["q_proj","k_proj","v_proj","up_proj"]` 即可 |
 | attention | flash_attention_2 | **eager** | 不是取舍，是唯一选项：`LLaDAModelLM` 不参与 HF 的 attn 派发，非 eager 一律 `ValueError`。也没有性能损失，它内部本来就在调 `F.scaled_dot_product_attention`。顺带省掉 flash-attn 在 Colab 上 20 分钟的编译 |
 
 ### 提速效果核算
@@ -83,7 +84,8 @@
 | `lora_r` | 128 | |
 | `lora_alpha` | 64 | **不要改**。alpha < r 意味着缩放系数 0.5，不是常见的 alpha=2r。按习惯改会让有效学习率翻 4 倍 |
 | `lora_dropout` | 0.05 | |
-| target modules | 全部线性层（q/k/v/o/gate/up/down） | |
+| target modules | `q_proj` `k_proj` `v_proj` `attn_out` `ff_proj` `up_proj` `ff_out` | LLaDA（OLMo 系）的命名，不是 Llama 那套：`attn_out`↔`o_proj`、`ff_proj`↔`gate_proj`、`ff_out`↔`down_proj`。**与 d1 实际行为有别**，见第 2 节 |
+| LoRA 是否覆盖词表投影 | 否 | LLaDA 的词表投影也叫 `ff_out`，与块内 FFN 下投影重名。PEFT 按名字末段匹配，不排除就会把 `[4096, 126464]` 一起挂上（r=128 时多 1670 万参数）。`lm_head_exclusion` 用全匹配正则只排掉它 |
 
 ### 优化器
 

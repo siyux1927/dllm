@@ -70,8 +70,10 @@ Colab：打开 `notebooks/colab_p1_p2.ipynb`，运行时选 A100。
 **每次内更新都重新采 prompt 掩码模式 q'**，且 θ、θ_old、θ_ref 三次估计共享同一个 q'——
 论文式 4 中 q' 位于期望之内，三者必须一致。
 
-**CPU 小模型的结构对齐 LLaDA**（`q_proj` / `gate_proj` 等命名），因此单测里的 LoRA
-`target_modules` 与真实配置是同一份，适配器挂不上会在本地就暴露。
+**CPU 小模型的结构对齐 LLaDA**，线性层照抄它的命名（`q_proj` / `k_proj` / `v_proj` /
+`attn_out` / `ff_proj` / `up_proj` / `ff_out`），连词表投影与 FFN 下投影重名这点也保留。
+单测里的 LoRA `target_modules` 因此与真实配置是同一份，适配器挂不上会在本地就暴露。
+这条对齐曾经是假的——替身用的是 Llama 命名，于是它什么也没能拦住，见「踩过的坑」。
 
 **每个自检都对应一种「不报错的失效」。** 这类问题在 8B 模型上要烧几小时 A100 才可能发现，
 所以尽量在 CPU 上、或在加载权重的第一分钟内就把它们变成显式报错。
@@ -93,11 +95,18 @@ Colab：打开 `notebooks/colab_p1_p2.ipynb`，运行时选 A100。
 小模型因此改成显式的 Transformer 块，并留了一条回归测试同时断言「被包装」和「被调用」。
 `load_llada` 里的 `probe_lora_is_live` 是同一条检查在真实模型上的版本。
 
+**替身与真身对不上，等于没有替身。** 小模型的线性层原本用 Llama 命名，因为想当然地以为
+LLaDA 也是那套。于是「单测里的 target_modules 与真实配置是同一份」这个前提一直不成立，
+`resolve_target_modules` 在 CPU 上永远命中、永远不报警，直到租下 A100、下完 16GB 权重才
+第一次真正生效。现在小模型照抄 LLaDA 的命名，包括词表投影与 FFN 下投影都叫 `ff_out`
+这个坑——PEFT 按名字末段匹配，不显式排除就会把 `[d_model, vocab]` 那个大矩阵一起挂上。
+
 由此衍生出的三条自检：
 
-- **`resolve_target_modules`**：LLaDA 派生自 OLMo，线性层未必叫 `q_proj` / `gate_proj`。
-  匹配不上就带着模型真实的模块名单报错；**只匹配上一部分同样报错**——部分命中比全不命中
-  更危险，它会给你一个和预期不同却照常训练的模型。
+- **`resolve_target_modules`**：LLaDA 派生自 OLMo，注意力输出叫 `attn_out` 而非 `o_proj`，
+  FFN 是 `ff_proj` / `up_proj` / `ff_out` 而非 `gate/up/down_proj`。匹配不上就带着模型真实的
+  模块名单报错；**只匹配上一部分同样报错**——部分命中比全不命中更危险，它会给你一个和预期
+  不同却照常训练的模型。d1 官方正是照 Llama 命名配置的，实际只挂上了 q/k/v/up 四类。
 - **`probe_padding_invariance`**：LLaDA 官方的 generate 按单条 prompt 写就，从没验证过
   带 padding 的批处理。区分「attention_mask 失效」（硬伤）与「位置编码随 padding 平移」
   （RoPE 不受影响，绝对位置嵌入会）。
