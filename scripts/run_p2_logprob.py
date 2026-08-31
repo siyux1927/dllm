@@ -21,8 +21,12 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import sys
 from pathlib import Path
+
+# 必须早于 CUDA 初始化，理由同 run_p1_profile.py
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 

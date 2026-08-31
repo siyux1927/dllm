@@ -14,9 +14,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
+
+# 必须早于 CUDA 初始化。采样期的大块与优化期的微批小块交替申请，缓存分配器会把
+# 段切碎——上一版 OOM 时 allocated 只有 25GB，却有 12.2GB 卡在 reserved 里取不出来。
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 

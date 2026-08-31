@@ -25,8 +25,8 @@ from dllm.logprob.estimators import one_step_token_logprobs
 from dllm.models.llada import lm_head_exclusion
 from dllm.models.tiny import TinyMaskedDiffusionLM
 from dllm.rewards.countdown import RewardBreakdown, batch_rewards
-from dllm.train.checkpoint import load_checkpoint, mirror_checkpoint
 from dllm.train import loop as loop_module
+from dllm.train.checkpoint import load_checkpoint, mirror_checkpoint
 from dllm.train.loop import DiffuGRPOTrainer, PromptSampler, completion_mask_from_eos
 from dllm.train.policy import Policy
 

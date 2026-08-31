@@ -35,13 +35,16 @@ def add_gumbel_noise(
 
     LLaDA 官方写作 exp(logits) / (-log u)^T，取 argmax 后等价于 argmax(logits + T*Gumbel)，
     这里直接用后者，数值上更稳。
+
+    全程原地：logits 在采样时是 (B, block, V)，每个同尺寸 fp32 临时张量都是几百 MB，
+    照数学式子直写会同时活着五六个。
     """
     if temperature <= 0:
         return logits
-    uniform = torch.rand(logits.shape, device=logits.device, generator=generator)
-    uniform = uniform.clamp_min(torch.finfo(torch.float32).tiny)
-    gumbel = -torch.log(-torch.log(uniform))
-    return logits.float() + temperature * gumbel
+    noise = torch.rand(logits.shape, device=logits.device, generator=generator)
+    noise.clamp_min_(torch.finfo(torch.float32).tiny)
+    noise.log_().neg_().log_().neg_()  # -log(-log u)
+    return noise.mul_(temperature).add_(logits)
 
 
 def get_num_transfer_tokens(mask_index: torch.Tensor, steps: int) -> torch.Tensor:
@@ -101,27 +104,29 @@ def generate(
         )
 
         for step in range(sampling.steps_per_block):
-            mask_index = x == mask_id
-            if not mask_index[:, lo:hi].any():
+            block_mask = x[:, lo:hi] == mask_id
+            if not block_mask.any():
                 break
 
             logits = _forward_logits(model, x, full_attention_mask)
             num_forward_passes += 1
 
-            x0 = add_gumbel_noise(logits, sampling.temperature, generator).argmax(dim=-1)
+            # 块外位置的 logits 一律用不上（下面的 confidence 只在块内取值），
+            # 切块让噪声与 softmax 的 fp32 临时张量小 8 倍，这是采样阶段的显存主项
+            block_logits = logits[:, lo:hi, :]
+            x0 = add_gumbel_noise(block_logits, sampling.temperature, generator).argmax(dim=-1)
 
             if sampling.remasking == "low_confidence":
-                probs = F.softmax(logits.float(), dim=-1)
+                probs = F.softmax(block_logits.float(), dim=-1)
                 confidence = probs.gather(-1, x0.unsqueeze(-1)).squeeze(-1)
             else:
                 confidence = torch.rand(
                     x0.shape, device=device, generator=generator, dtype=torch.float32
                 )
+            del logits, block_logits
 
-            # 只允许解当前块内、且当前仍是掩码的位置
-            confidence = confidence.masked_fill(~mask_index, float("-inf"))
-            confidence[:, :lo] = float("-inf")
-            confidence[:, hi:] = float("-inf")
+            # 只允许解当前仍是掩码的位置
+            confidence = confidence.masked_fill(~block_mask, float("-inf"))
 
             for row in range(batch_size):
                 k = int(num_transfer[row, step])
@@ -132,7 +137,7 @@ def generate(
                 if k <= 0:
                     continue
                 selected = torch.topk(confidence[row], k=k).indices
-                x[row, selected] = x0[row, selected]
+                x[row, lo + selected] = x0[row, selected]
 
     return GenerationOutput(
         sequences=x,
