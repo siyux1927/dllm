@@ -6,29 +6,21 @@
 3. 实测占比对上理论前向次数预算，两者对不上就说明有别的开销。
 4. 由采样占比推出 P4 的端到端收益上限——决定 P4 值不值得做，在花 A100 之前就该知道。
 
-用法：
-    python scripts/run_p1_profile.py --config configs/countdown_base.yaml --steps 3
+用法（在仓库根目录）：
+    python -m scripts.run_p1_profile --config configs/countdown_base.yaml --steps 3
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
-import sys
 from dataclasses import replace
 from pathlib import Path
 
-# 必须早于 CUDA 初始化。采样期的大块与优化期的微批小块交替申请，缓存分配器会把
-# 段切碎——上一版 OOM 时 allocated 只有 25GB，却有 12.2GB 卡在 reserved 里取不出来。
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-import torch  # noqa: E402
-
-from dllm.config import Config  # noqa: E402
-from dllm.experiment import (  # noqa: E402
+from dllm.config import Config
+from dllm.experiment import (
     amdahl_speedup,
     build_problems,
     build_tiny_bundle,
@@ -36,14 +28,14 @@ from dllm.experiment import (  # noqa: E402
     shrink_config_for_cpu,
     step_compute_budget,
 )
-from dllm.models.llada import (  # noqa: E402
+from dllm.models.llada import (
     linear_module_suffixes,
     load_llada,
     probe_padding_invariance,
 )
-from dllm.sampling.diffusion import generate  # noqa: E402
-from dllm.train.loop import DiffuGRPOTrainer  # noqa: E402
-from dllm.utils.metrics import MetricsLogger  # noqa: E402
+from dllm.sampling.diffusion import generate
+from dllm.train.loop import DiffuGRPOTrainer
+from dllm.utils.metrics import MetricsLogger
 
 # bf16 下 padding 位置的数值扰动不可能严格为零，这个阈值区分「舍入噪声」与「真的泄漏」
 PADDING_LEAK_TOLERANCE = 0.05
@@ -161,19 +153,25 @@ def run_sweep(
     一并赔进去，而那一档可能刚烧了十分钟 A100。
     """
     profile_fn = profile_fn or profile_one_setting
-    sweep_values = args.sweep_diffusion_steps or [config.sampling.diffusion_steps]
+    configured_steps = config.sampling.diffusion_steps
+    sweep_values = args.sweep_diffusion_steps or [configured_steps]
     report["sweep"] = {}
-    for steps_value in sweep_values:
-        print("\n" + "=" * 70)
-        print(
-            f"耗时拆解：diffusion_steps={steps_value}"
-            f"（预热 {args.warmup} 步 + 统计 {args.steps} 步）"
-        )
-        print("=" * 70)
-        trainer.config = set_diffusion_steps(config, steps_value)
-        report["sweep"][str(steps_value)] = profile_fn(trainer, args, config)
-        write_report(report, out_path)
-        print(f"  已落盘 {out_path}")
+    try:
+        for steps_value in sweep_values:
+            print("\n" + "=" * 70)
+            print(
+                f"耗时拆解：diffusion_steps={steps_value}"
+                f"（预热 {args.warmup} 步 + 统计 {args.steps} 步）"
+            )
+            print("=" * 70)
+            trainer.config = set_diffusion_steps(config, steps_value)
+            report["sweep"][str(steps_value)] = profile_fn(trainer, args, config)
+            write_report(report, out_path)
+            print(f"  已落盘 {out_path}")
+    finally:
+        # set_diffusion_steps 原地改 config，不还回去的话调用方读到的是最后一档，
+        # 于是 report["config"] 记 64、report["timing"] 记 128，两个数字在同一份报告里对不上
+        trainer.config = set_diffusion_steps(config, configured_steps)
     return report
 
 
@@ -196,6 +194,12 @@ def set_diffusion_steps(config: Config, steps: int) -> Config:
     留下一个非法但不报错的配置。
     """
     config.sampling = replace(config.sampling, diffusion_steps=steps)
+    return config
+
+
+def set_completion_length(config: Config, length: int) -> Config:
+    """改 max_completion_length 并重跑校验，理由同 set_diffusion_steps。"""
+    config.sampling = replace(config.sampling, max_completion_length=length)
     return config
 
 
@@ -226,6 +230,12 @@ def parse_args() -> argparse.Namespace:
         help="依次在这些 diffusion_steps 取值上测一遍，用于决定该取多少。留空则只测配置里的值",
     )
     p.add_argument(
+        "--max-completion-length",
+        type=int,
+        default=None,
+        help="覆盖配置里的补全长度，用于测截断影响。留空则用配置值",
+    )
+    p.add_argument(
         "--tiny",
         action="store_true",
         help="用 CPU 小模型跑通整条脚本路径，不加载 LLaDA。数字无意义，只验证接线",
@@ -236,6 +246,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     config = Config.from_yaml(args.config)
+    if args.max_completion_length is not None:
+        # 必须在 shrink_config_for_cpu 和建 trainer 之前，否则改的是一份已经被读过的配置
+        config = set_completion_length(config, args.max_completion_length)
     device = torch.device("cpu" if args.tiny else args.device)
     report: dict = {"config_path": args.config, "tiny": args.tiny}
     out_path = Path(args.out)
@@ -243,6 +256,8 @@ def main() -> None:
     print("=" * 70)
     if args.tiny:
         print("CPU 小模型冒烟模式：只验证脚本接线，输出的数字不具备任何意义")
+        if args.max_completion_length is not None:
+            print("  注意：--max-completion-length 在 tiny 模式下被缩表覆盖，实际用 16")
         config = shrink_config_for_cpu(config)
         bundle = build_tiny_bundle(config, device="cpu")
     else:
@@ -326,7 +341,10 @@ def main() -> None:
     run_sweep(trainer, args, config, report, out_path)
 
     default_key = str(config.sampling.diffusion_steps)
-    chosen = report["sweep"].get(default_key, next(iter(report["sweep"].values())))
+    # 扫参跳过默认档时会退到第一档，光看 timing/amdahl 认不出是哪一档，引数字必须能对上
+    headline_key = default_key if default_key in report["sweep"] else next(iter(report["sweep"]))
+    chosen = report["sweep"][headline_key]
+    report["headline_diffusion_steps"] = int(headline_key)
     report["timing"] = chosen["timing"]
     report["budget"] = chosen["budget"]
     report["amdahl"] = chosen["amdahl"]

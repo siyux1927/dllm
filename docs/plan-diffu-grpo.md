@@ -301,7 +301,7 @@ P0 阶段暴露的问题（已修）：
 ```powershell
 conda env create -f environment.yml
 conda activate dllm-dev
-python scripts/check_env.py
+python -m scripts.check_env
 ```
 
 `scripts/check_env.py` 会逐项校验版本，并确认 `GRPOConfig` 具备 `num_iterations` / `epsilon` / `beta` / `num_generations` 四个字段——这是 trl commit 是否正确的判据。
@@ -312,7 +312,7 @@ python scripts/check_env.py
 
 ```python
 !pip install -q -r requirements-colab.txt
-!python scripts/check_env.py   # 与本地跑同一个自检
+!python -m scripts.check_env   # 与本地跑同一个自检
 ```
 
 HF 缓存指向 Drive，避免每次 session 重下 16GB 权重：

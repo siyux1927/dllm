@@ -2,7 +2,7 @@
 #
 #   conda env create -f environment.yml
 #   conda activate dllm-dev
-#   python scripts/check_env.py
+#   python -m scripts.check_env
 #
 # 注意：torch 走 PyTorch 官方 CPU 源，trl 必须锁到 d1 使用的那个 commit，
 # 否则 GRPOTrainer 的接口对不上。

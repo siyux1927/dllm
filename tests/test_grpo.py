@@ -23,11 +23,16 @@ def test_advantages_with_scaling_are_normalized():
 
 
 def test_uniform_group_gives_zero_advantage():
-    """组内奖励全同时优势必须是 0，不能因为除以零标准差变成 NaN。"""
-    rewards = torch.tensor([2.0, 2.0, 2.0, 2.0])
-    adv = compute_advantages(rewards, num_generations=4, scale_rewards=True)
+    """组内奖励全同时优势必须精确为 0，否则 zero_advantage_frac 会漏报整步空转。
+
+    取值抄自 P1 第 4 步实测：format 全对 correct 全错，落在 float32(0.2) 上方一个 ULP。
+    该 ULP 除以 6 除不尽，减均值剩 2^-26 的残差，再除 eps 放大一万倍到 1.5e-4；
+    组大小取 4 或奖励取 0.2 都除得尽、残差为 0，这是原测试放过它的原因。
+    """
+    rewards = torch.full((6,), 0.20000001788139343, dtype=torch.float32)
+    adv = compute_advantages(rewards, num_generations=6, scale_rewards=True)
     assert torch.isfinite(adv).all()
-    assert torch.allclose(adv, torch.zeros(4), atol=1e-6)
+    assert adv.abs().max().item() == 0.0
 
 
 def test_advantages_reject_misaligned_group_size():

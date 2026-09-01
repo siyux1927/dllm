@@ -48,8 +48,11 @@ def compute_advantages(
     grouped = rewards.view(-1, num_generations).float()
     advantages = grouped - grouped.mean(dim=1, keepdim=True)
     if scale_rewards:
-        # 组内奖励全同时标准差为 0，此时优势本就该是 0，加 eps 防止除零产生 NaN
-        advantages = advantages / (grouped.std(dim=1, keepdim=True) + 1e-4)
+        # 退化组必须显式置零，不能靠 eps 兜除零：分子是 float32 舍入残差（0.2 附近约 2^-26），
+        # 除以 1e-4 会把它放大一万倍，于是 zero_advantage_frac 的 1e-8 判据漏报整步空转
+        degenerate = (grouped == grouped[:, :1]).all(dim=1, keepdim=True)
+        scaled = advantages / (grouped.std(dim=1, keepdim=True) + 1e-4)
+        advantages = torch.where(degenerate, torch.zeros_like(scaled), scaled)
     return advantages.reshape(-1)
 
 

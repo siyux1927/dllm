@@ -92,8 +92,8 @@ md(
 
 两种方式二选一：
 
-- 已经把项目推到 git 远端 → 填 `GIT_URL`
-- 还没有 → 把整个项目文件夹上传到 Drive 的 `MyDrive/dllm-grpo/diff`，直接跑本单元
+- 跑远端的已推送版本 → 直接跑本单元，`GIT_URL` 已填好
+- 跑本地未推送的改动 → 把项目文件夹上传到 Drive 的 `MyDrive/dllm-grpo/diff`，并把 `GIT_URL` 清空
 """
 )
 
@@ -102,7 +102,7 @@ code(
 import shutil
 import subprocess
 
-GIT_URL = ''  # 例如 'https://github.com/<you>/diff.git'，留空则从 Drive 复制
+GIT_URL = 'https://github.com/siyux1927/dllm.git'  # 留空则改从 Drive 复制
 PROJECT_DIR = Path('/content/diff')
 
 if PROJECT_DIR.exists():
@@ -195,7 +195,7 @@ os.chdir(PROJECT_DIR)
 # check_env 会先验 torchvision 的算子再去 import transformers / trl。
 # 顺序是有意的：后者的导入链会踩到 torchvision，一旦踩爆，
 # 报出来的是一条指向 transformers 内部的六十行 traceback，看不出真正的病因。
-!python scripts/check_env.py
+!python -m scripts.check_env
 """
 )
 
@@ -248,7 +248,7 @@ md(
 
 code(
     """
-!python scripts/run_p1_profile.py \\
+!python -m scripts.run_p1_profile \\
     --config configs/countdown_base.yaml \\
     --warmup 1 --steps 2 \\
     --sweep-diffusion-steps 64 128 \\
@@ -400,7 +400,7 @@ B 是关键：它给 ε=0.5 提供实证依据。clip 要挡的是策略跑偏�
 
 code(
     """
-!python scripts/run_p2_logprob.py \\
+!python -m scripts.run_p2_logprob \\
     --config configs/countdown_base.yaml \\
     --num-prompts 2 --mc-samples 128 \\
     --out {RESULTS}/p2_logprob.json \\
@@ -594,14 +594,99 @@ P3 的训练脚本会以 `trainer.resume()` 开头：先找本地，再回落到
 
 md(
     """
+## 9. 下一次开机要跑的两件事
+
+第一轮 P1/P2 已经跑完，数据在 `figures/`。这一节是第二轮，只有两件事，
+**上面第 1 到 4 节的环境准备照跑，第 6 节的 P2 不用重跑**——改动只涉及采样的选点方式，
+log-prob 估计器没动，P2 的偏差与 ratio 噪声不会变。
+
+1. **验证采样簿记的修复。** 第一轮实测采样占比比按前向次数算的预算高 5-6 个百分点，
+   归因是重掩码逐行 topk 每步 48 次 GPU 到 CPU 同步。改成整批取点后这个差应该明显收窄。
+2. **测截断影响。** 第一轮七到九成补全撞在 128 的长度上限上，`correct_mean` 只有 0.16，
+   分不清是推理不行还是答案没写完。对照组必须固定每步解码的 token 数，否则并行度
+   一起变了就说明不了长度的事：128 长度配 64 步、256 长度配 128 步，两边都是每步 2 个。
+
+两段合计约 40 分钟。结果写成 `_v2` / `_trunc256` 后缀的新文件，不覆盖第一轮的数据。
+"""
+)
+
+code(
+    """
+# 一、重跑两档，看采样占比是否向理论预算收敛
+!python -m scripts.run_p1_profile \\
+    --config configs/countdown_base.yaml \\
+    --sweep-diffusion-steps 64 128 \\
+    --warmup 1 --steps 2 \\
+    --out {RESULTS}/p1_profile_v2.json \\
+    --metrics-csv {RESULTS}/p1_metrics_v2.csv
+
+# 二、截断探针：256 长度配 128 步，与上面 128 长度配 64 步同为每步 2 token
+!python -m scripts.run_p1_profile \\
+    --config configs/countdown_base.yaml \\
+    --max-completion-length 256 \\
+    --sweep-diffusion-steps 128 \\
+    --warmup 1 --steps 3 \\
+    --out {RESULTS}/p1_trunc256.json \\
+    --metrics-csv {RESULTS}/p1_metrics_trunc256.csv
+"""
+)
+
+code(
+    """
+import csv
+import json
+
+report = json.loads((RESULTS / 'p1_profile_v2.json').read_text(encoding='utf-8'))
+print('采样占比与理论预算的差（第一轮为 64 步 +6.3、128 步 +5.3 个百分点）')
+for key in sorted(report['sweep'], key=int):
+    entry = report['sweep'][key]
+    measured = entry['timing']['generation_frac']
+    budget = entry['budget']['budget/generation_share']
+    print(f"  {key:>4} 步   实测 {measured:6.1%}   预算 {budget:6.1%}   "
+          f"差 {(measured - budget) * 100:+5.1f} 个百分点")
+
+
+def summarize(path, label, forward_passes=None):
+    with path.open(encoding='utf-8') as handle:
+        rows = [r for r in csv.DictReader(handle)
+                if forward_passes is None
+                or int(r['generation/forward_passes']) == forward_passes]
+
+    def avg(key):
+        return sum(float(r[key]) for r in rows) / len(rows)
+
+    print(f"  {label}  {len(rows)} 步   correct {avg('reward/correct_mean'):.3f}   "
+          f"eos 命中 {avg('completion/eos_hit_frac'):.2f}   "
+          f"长度 {avg('completion/mean_length'):5.1f}   "
+          f"单步 {avg('time/total_s'):6.1f}s")
+
+
+print('\\n截断影响（两行都是每步 2 token，只有补全长度不同）')
+summarize(RESULTS / 'p1_metrics_v2.csv', '长度 128', forward_passes=64)
+summarize(RESULTS / 'p1_metrics_trunc256.csv', '长度 256')
+"""
+)
+
+md(
+    """
+### 怎么判读
+
+采样占比那两行，差值收窄到 1-2 个百分点就说明归因正确、修复生效；若还是 5 个点以上，
+那 5-6 个点不是同步开销，得回头加细粒度计时重新归因，别急着接 Fast-dLLM。
+
+截断那两行，样本只有几十条补全，是方向性探针不是测量，别拿它算显著性。
+`correct` 明显上去、`eos 命中` 明显上去，就说明 0.16 里有相当一部分是被长度掐掉的，
+P3 该把 `max_completion_length` 调到 256，代价是单步耗时翻倍。
+两个数都没动，那 0.16 就是模型的真实水平，长度维持 128，省下的时间留给训练步数。
+
 ## 下一步
 
-P1、P2 的数据齐了，接下来是 P3：跑 vanilla diffu-GRPO 基线。开跑前两件事：
+上面两件事都清了才进 P3，也就是跑 vanilla diffu-GRPO 基线。开跑前还有两件：
 
-1. 拿第 5 节那张表定 `diffusion_steps`——它同时决定单步成本和 P4 的收益上限，
-   这个权衡应该带着实测数字来定。顺便看一眼「200 步耗时」那列，
-   如果超过 5 小时，先调 `max_steps` 或 `num_prompts_per_step`。
-2. 拿第 8 节的实测写入速度定 `mirror_every`，并做一次恢复演练。
+1. 拿第 5 节那张表定 `diffusion_steps`——它同时决定单步成本和 P4 的收益上限。
+   顺便看一眼「200 步耗时」那列，如果超过 5 小时，先调 `max_steps` 或 `num_prompts_per_step`。
+2. 拿第 8 节的实测写入速度定 `mirror_every`，并**真的做一次恢复演练**。
+   200 步乘 200 秒是 11 小时，远超一个 Colab 会话，续训跑不通 P3 就跑不完。
 """
 )
 

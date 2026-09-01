@@ -1,0 +1,195 @@
+{
+  "config_path": "configs/countdown_base.yaml",
+  "tiny": false,
+  "config": {
+    "model": {
+      "model_path": "GSAI-ML/LLaDA-8B-Instruct",
+      "torch_dtype": "bfloat16",
+      "attn_implementation": "eager",
+      "trust_remote_code": true,
+      "mask_token_id": 126336,
+      "lora_r": 128,
+      "lora_alpha": 64,
+      "lora_dropout": 0.05,
+      "lora_target_modules": [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "attn_out",
+        "ff_proj",
+        "up_proj",
+        "ff_out"
+      ]
+    },
+    "sampling": {
+      "max_prompt_length": 128,
+      "max_completion_length": 128,
+      "block_length": 32,
+      "diffusion_steps": 64,
+      "temperature": 1.0,
+      "remasking": "low_confidence",
+      "use_cache": false,
+      "dual_cache": false,
+      "confidence_threshold": null
+    },
+    "grpo": {
+      "num_generations": 6,
+      "num_prompts_per_step": 4,
+      "num_iterations": 12,
+      "epsilon": 0.5,
+      "beta": 0.04,
+      "p_mask_prompt": 0.15,
+      "random_masking": true,
+      "scale_rewards": true,
+      "reward_format_weight": 0.2,
+      "reward_correct_weight": 1.0,
+      "micro_batch_size": 4
+    },
+    "optim": {
+      "learning_rate": 3e-06,
+      "lr_scheduler_type": "constant_with_warmup",
+      "warmup_ratio": 0.0001,
+      "adam_beta1": 0.9,
+      "adam_beta2": 0.99,
+      "weight_decay": 0.1,
+      "max_grad_norm": 0.2
+    },
+    "run": {
+      "seed": 42,
+      "max_steps": 200,
+      "save_steps": 25,
+      "eval_steps": 50,
+      "log_every": 1,
+      "output_dir": "checkpoints/countdown_base",
+      "mirror_dir": null,
+      "mirror_every": 4,
+      "metrics_path": "results/countdown_base.csv",
+      "report_to": "none",
+      "device": "auto"
+    },
+    "data": {
+      "task": "countdown",
+      "num_train": 4000,
+      "num_eval": 500,
+      "num_operands": 3,
+      "min_operand": 1,
+      "max_operand": 60,
+      "min_target": 10,
+      "max_target": 500
+    }
+  },
+  "model": {
+    "target_modules": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "attn_out",
+      "ff_proj",
+      "up_proj",
+      "ff_out"
+    ],
+    "trainable_params": 335544320,
+    "total_params": 8686669824,
+    "linear_suffixes": {
+      "base_layer": 224,
+      "default": 448,
+      "old": 448,
+      "ff_out": 1
+    }
+  },
+  "padding_leak": 0.4375,
+  "sample_completion": "<think>\nFirst, let's break down the numbers 41, 8, and 2 and how can we use them to reach a number like 66. We\ncan start by breaking down 66 into smaller components that can be created using 41, 8, and 2.\n\n- 66 can be reached from:\n  41 + 8 = 49\n  49 + 7 = 66\n</think>\n\n<answer>\n(41 + 8) + 2 \n</answer>",
+  "generation_forward_passes": 64,
+  "sweep": {
+    "64": {
+      "timing": {
+        "total_s": 127.56352580599957,
+        "generation_s": 73.92990319899991,
+        "generation_frac": 0.5795536201570368,
+        "reward_s": 0.00591882500009433,
+        "reward_frac": 4.6399058378883597e-05,
+        "logprob_s": 17.238362560499922,
+        "logprob_frac": 0.1351355136155104,
+        "forward_backward_s": 36.38934122149965,
+        "forward_backward_frac": 0.28526446716907394
+      },
+      "budget": {
+        "budget/generation_fwd": 64.0,
+        "budget/logprob_fwd": 24.0,
+        "budget/policy_fwd": 36.0,
+        "budget/total_fwd": 124.0,
+        "budget/generation_share": 0.5161290322580645
+      },
+      "generation_forward_passes": 64,
+      "amdahl": {
+        "generation_frac": 0.5795536201570368,
+        "ceiling": 2.378424569557479,
+        "projections": {
+          "1.5x": 1.2394408010784512,
+          "2x": 1.4080080940620294,
+          "3x": 1.6296440866614241,
+          "5x": 1.864429486952833
+        }
+      }
+    },
+    "128": {
+      "timing": {
+        "total_s": 201.41358777900007,
+        "generation_s": 147.78348498800017,
+        "generation_frac": 0.7337314557611574,
+        "reward_s": 0.007315008000091439,
+        "reward_frac": 3.6318354979533486e-05,
+        "logprob_s": 17.23454707450003,
+        "logprob_frac": 0.085567946392477,
+        "forward_backward_s": 36.38824070849978,
+        "forward_backward_frac": 0.18066427949138614
+      },
+      "budget": {
+        "budget/generation_fwd": 128.0,
+        "budget/logprob_fwd": 24.0,
+        "budget/policy_fwd": 36.0,
+        "budget/total_fwd": 188.0,
+        "budget/generation_share": 0.6808510638297872
+      },
+      "generation_forward_passes": 128,
+      "amdahl": {
+        "generation_frac": 0.7337314557611574,
+        "ceiling": 3.7556069676146238,
+        "projections": {
+          "1.5x": 1.3237619202836315,
+          "2x": 1.5794437989472487,
+          "3x": 1.957538269419626,
+          "5x": 2.421220533284533
+        }
+      }
+    }
+  },
+  "timing": {
+    "total_s": 201.41358777900007,
+    "generation_s": 147.78348498800017,
+    "generation_frac": 0.7337314557611574,
+    "reward_s": 0.007315008000091439,
+    "reward_frac": 3.6318354979533486e-05,
+    "logprob_s": 17.23454707450003,
+    "logprob_frac": 0.085567946392477,
+    "forward_backward_s": 36.38824070849978,
+    "forward_backward_frac": 0.18066427949138614
+  },
+  "budget": {
+    "budget/generation_fwd": 128.0,
+    "budget/logprob_fwd": 24.0,
+    "budget/policy_fwd": 36.0,
+    "budget/total_fwd": 188.0,
+    "budget/generation_share": 0.6808510638297872
+  },
+  "amdahl": {
+    "generation_frac": 0.7337314557611574,
+    "ceiling": 3.7556069676146238,
+    "projections": {
+      "1.5x": 1.3237619202836315,
+      "2x": 1.5794437989472487,
+      "3x": 1.957538269419626,
+      "5x": 2.421220533284533
+    }
+  }
+}

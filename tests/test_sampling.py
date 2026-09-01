@@ -2,7 +2,12 @@ import pytest
 import torch
 
 from dllm.config import SamplingConfig
-from dllm.sampling.diffusion import add_gumbel_noise, generate, get_num_transfer_tokens
+from dllm.sampling.diffusion import (
+    add_gumbel_noise,
+    generate,
+    get_num_transfer_tokens,
+    select_unmask_positions,
+)
 
 
 def test_num_transfer_tokens_sums_to_mask_count():
@@ -21,6 +26,38 @@ def test_num_transfer_tokens_puts_remainder_first():
 def test_num_transfer_tokens_handles_no_masks():
     mask_index = torch.zeros(2, 4, dtype=torch.bool)
     assert get_num_transfer_tokens(mask_index, steps=3).sum() == 0
+
+
+def test_select_unmask_positions_matches_per_row_topk():
+    """向量化选点必须和原来的逐行 topk 选出同一批位置。
+
+    选错位置不会报错、也照样生成通顺文本，只是解码顺序偷偷变了，属于静默失败，得盯住。
+    """
+    torch.manual_seed(0)
+    for _ in range(20):
+        batch, length = 4, 8
+        confidence = torch.rand(batch, length)
+        # 随机制造已解位置（-inf）与 k 超出可选数、k 为 0 的行
+        already_done = torch.rand(batch, length) < 0.3
+        confidence = confidence.masked_fill(already_done, float("-inf"))
+        available = (~already_done).sum(dim=1)
+        num_to_unmask = torch.minimum(torch.randint(0, length + 1, (batch,)), available)
+
+        expected = torch.zeros(batch, length, dtype=torch.bool)
+        for row in range(batch):
+            k = int(num_to_unmask[row])
+            if k > 0:
+                expected[row, torch.topk(confidence[row], k=k).indices] = True
+
+        assert torch.equal(select_unmask_positions(confidence, num_to_unmask), expected)
+
+
+def test_select_unmask_positions_never_picks_exhausted_rows():
+    confidence = torch.full((2, 4), float("-inf"))
+    confidence[0] = torch.tensor([0.9, 0.1, float("-inf"), float("-inf")])
+    take = select_unmask_positions(confidence, torch.tensor([1, 0]))
+    assert take[0].tolist() == [True, False, False, False]
+    assert not take[1].any()
 
 
 def test_gumbel_noise_is_identity_at_zero_temperature():

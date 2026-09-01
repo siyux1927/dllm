@@ -12,8 +12,8 @@ B. 同一份权重、两个不同的 prompt 掩码模式 q'，算出的 ratio �
 C. 噪声随 p_mask_prompt 的变化。掩码越多、正则越强，但 ratio 噪声也越大，
    p_mask_prompt=0.15 是这条权衡上的取值。
 
-用法：
-    python scripts/run_p2_logprob.py --config configs/countdown_base.yaml --mc-samples 128
+用法（在仓库根目录）：
+    python -m scripts.run_p2_logprob --config configs/countdown_base.yaml --mc-samples 128
 """
 
 from __future__ import annotations
@@ -21,31 +21,24 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import os
-import sys
 from pathlib import Path
 
-# 必须早于 CUDA 初始化，理由同 run_p1_profile.py
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-import torch  # noqa: E402
-
-from dllm.config import Config  # noqa: E402
-from dllm.experiment import (  # noqa: E402
+from dllm.config import Config
+from dllm.experiment import (
     build_problems,
     build_tiny_bundle,
     make_reward_fn,
     shrink_config_for_cpu,
 )
-from dllm.logprob.estimators import (  # noqa: E402
+from dllm.logprob.estimators import (
     monte_carlo_token_logprobs,
     one_step_token_logprobs,
     sample_prompt_mask,
 )
-from dllm.models.llada import load_llada  # noqa: E402
-from dllm.train.loop import DiffuGRPOTrainer  # noqa: E402
+from dllm.models.llada import load_llada
+from dllm.train.loop import DiffuGRPOTrainer
 
 
 def parse_args() -> argparse.Namespace:

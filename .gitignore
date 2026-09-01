@@ -1,7 +1,11 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.ruff_cache/
 .ipynb_checkpoints/
+
+# 本地约定，不属于这个项目
+DEV_SKILL.md
 
 # 训练产物：checkpoints 单个就有数 GB，results 每次运行都会重写
 checkpoints/

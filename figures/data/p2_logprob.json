@@ -1,0 +1,61 @@
+{
+  "config_path": "configs/countdown_base.yaml",
+  "tiny": false,
+  "experiment_a": {
+    "num_tokens": 1489,
+    "one_step_mean": -3.999790668487549,
+    "monte_carlo_mean": -1.1069852113723755,
+    "bias_one_step_minus_mc": -2.892805337905884,
+    "mean_abs_diff": 2.917490005493164,
+    "median_abs_diff": 2.6229734420776367,
+    "pearson": 0.6480984687805176,
+    "spearman": 0.719288170337677
+  },
+  "experiment_b": {
+    "log_ratio_std": 0.6269123554229736,
+    "log_ratio_abs_mean": 0.3473639190196991,
+    "ratio_mean": 2.972787857055664,
+    "ratio_p05": 0.4618164002895355,
+    "ratio_p95": 2.322425365447998,
+    "out_of_range_frac_eps_0.2": 0.4714573621749878,
+    "out_of_range_frac_eps_0.5": 0.21289455890655518
+  },
+  "experiment_c": {
+    "0": {
+      "log_ratio_std": 0.0,
+      "log_ratio_abs_mean": 0.0,
+      "ratio_mean": 1.0,
+      "ratio_p05": 1.0,
+      "ratio_p95": 1.0,
+      "out_of_range_frac_eps_0.2": 0.0,
+      "out_of_range_frac_eps_0.5": 0.0
+    },
+    "0.15": {
+      "log_ratio_std": 0.6896644234657288,
+      "log_ratio_abs_mean": 0.3280197083950043,
+      "ratio_mean": 6.879087924957275,
+      "ratio_p05": 0.5031657814979553,
+      "ratio_p95": 2.1272196769714355,
+      "out_of_range_frac_eps_0.2": 0.45130959153175354,
+      "out_of_range_frac_eps_0.5": 0.15849563479423523
+    },
+    "0.3": {
+      "log_ratio_std": 0.9643734693527222,
+      "log_ratio_abs_mean": 0.5263758897781372,
+      "ratio_mean": 2.24182391166687,
+      "ratio_p05": 0.24005834758281708,
+      "ratio_p95": 3.2829673290252686,
+      "out_of_range_frac_eps_0.2": 0.5896574854850769,
+      "out_of_range_frac_eps_0.5": 0.32102081179618835
+    },
+    "0.5": {
+      "log_ratio_std": 1.2893123626708984,
+      "log_ratio_abs_mean": 0.7911796569824219,
+      "ratio_mean": 5.336048126220703,
+      "ratio_p05": 0.1322697401046753,
+      "ratio_p95": 6.8083953857421875,
+      "out_of_range_frac_eps_0.2": 0.7098724246025085,
+      "out_of_range_frac_eps_0.5": 0.44392210245132446
+    }
+  }
+}

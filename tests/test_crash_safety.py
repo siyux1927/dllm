@@ -113,6 +113,36 @@ def test_sweep_persists_each_setting_before_the_next(p1, tmp_path):
     assert set(json.loads(out.read_text(encoding="utf-8"))["sweep"]) == {"64", "128"}
 
 
+def test_sweep_restores_the_configured_diffusion_steps(p1, tmp_path):
+    """扫参改完 config 必须还回去，否则 headline 悄悄变成最后一档。
+
+    实测报告里 config 记 64、timing 记 128，两个数字在同一份 JSON 里对不上，
+    而 report["config"] 是扫参前写的，光看文件看不出是哪一档，绘图和 README 全会引错。
+    """
+    from dllm.config import Config
+
+    config = Config()
+    configured = config.sampling.diffusion_steps
+
+    class FakeArgs:
+        sweep_diffusion_steps = [64, 128]
+        warmup = 0
+        steps = 1
+
+    class FakeTrainer:
+        config = None
+
+    p1.run_sweep(
+        FakeTrainer(),
+        FakeArgs(),
+        config,
+        {},
+        tmp_path / "p1.json",
+        profile_fn=lambda *_: {"timing": {"total_s": 1.0}},
+    )
+    assert config.sampling.diffusion_steps == configured
+
+
 def test_sweep_revalidates_diffusion_steps(p1):
     """直接给 config.sampling.diffusion_steps 赋值会绕过整除性校验，
     留下一个非法却不报错的配置。"""
